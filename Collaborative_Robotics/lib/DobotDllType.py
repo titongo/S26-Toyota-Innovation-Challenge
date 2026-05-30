@@ -585,6 +585,26 @@ isUsingLinearRail = False
 #parker add 2018 8 29 添加Wifi设置模块退出标志位
 QuitDobotApiFlag = True
 
+# Linux C++ API Wrapper to bridge 5-argument python calls to 3-argument Linux functions
+class LinuxApiWrapper:
+    def __init__(self, api):
+        self.api = api
+
+    def __getattr__(self, name):
+        func = getattr(self.api, name)
+        
+        if name in ("ConnectDobot", "SearchDobot"):
+            return func
+        if name in ("DisconnectDobot", "PeriodicTask", "SetQueuedCmdStartExec", "SetQueuedCmdStopExec", "SetQueuedCmdForceStopExec", "SetQueuedCmdClear"):
+            return lambda *args, **kwargs: func()
+            
+        def wrapper(*args, **kwargs):
+            # Strip the first two args (masterId and slaveId) which are only used on Windows
+            cleaned_args = args[2:]
+            return func(*cleaned_args, **kwargs)
+            
+        return wrapper
+
 #kaustubh add 2026 03 13
 def load():
     # construct a path relative to this Python module's directory so
@@ -598,10 +618,12 @@ def load():
         return CDLL(dll_path, RTLD_GLOBAL)
     elif platform.system() == "Darwin":
         dylib_path = os.path.join(module_dir, "libDobotDll.dylib")
-        return CDLL(dylib_path, RTLD_GLOBAL)
+        raw_api = CDLL(dylib_path, RTLD_GLOBAL)
+        return LinuxApiWrapper(raw_api)
     elif platform.system() == "Linux":
         so_path = os.path.join(module_dir, "libDobotDll.so")
-        return CDLL(so_path, RTLD_GLOBAL)
+        raw_api = CDLL(so_path, RTLD_GLOBAL)
+        return LinuxApiWrapper(raw_api)
 
 
 def dSleep(ms):
@@ -645,39 +667,57 @@ def ConnectDobot(api, portName, baudrate):
 
     szPara = create_string_buffer(100)
     szPara.raw = portName.encode("utf-8") 
-    connectInfo = ConnectInfo()
 
-    result = api.ConnectDobot(szPara, baudrate, byref(connectInfo))
-    if result != DobotConnect.DobotConnect_NoError:
-        return [result, 0, 0, 0, 0, 0, 0, 0]
-    masterId = connectInfo.masterDevInfo.devId
-    masterDevType = connectInfo.masterDevInfo.type
-    try:
-        if masterDevType == DevType.Conntroller:
-            if connectInfo.slaveDevInfo1.type == 0 and connectInfo.slaveDevInfo2.type == 0:
-                slaveId = -1
-                slaveDevType = 0
-                try:
-                    fwName = str(connectInfo.masterDevInfo.firmwareName, encoding="utf-8").strip(b'\x00'.decode())
-                    fwVer = str(connectInfo.masterDevInfo.firwareVersion, encoding="utf-8").strip(b'\x00'.decode())
-                    # print("masterId: ", masterId, connectInfo.slaveDevInfo1.devId, connectInfo.slaveDevInfo2.devId, fwName, fwVer)
-                except Exception as e:
-                    print(e)
+    if platform.system() == "Linux" or platform.system() == "Darwin":
+        fwType = create_string_buffer(100)
+        version = create_string_buffer(100)
+        result = api.ConnectDobot(szPara, baudrate, fwType, version)
+        if result != DobotConnect.DobotConnect_NoError:
+            return [result, 0, 0, 0, 0, 0, 0, 0]
+        masterId = 0
+        slaveId = 0
+        masterDevType = DevType.Magician
+        slaveDevType = DevType.Idle
+        try:
+            fwName = fwType.value.decode("utf-8").strip()
+            fwVer = version.value.decode("utf-8").strip()
+        except Exception as e:
+            fwName = "Dobot"
+            fwVer = "1.0.0"
+        return [result, masterDevType, slaveDevType, fwName, fwVer, masterId, slaveId, 0.0]
+    else:
+        connectInfo = ConnectInfo()
+        result = api.ConnectDobot(szPara, baudrate, byref(connectInfo))
+        if result != DobotConnect.DobotConnect_NoError:
+            return [result, 0, 0, 0, 0, 0, 0, 0]
+        masterId = connectInfo.masterDevInfo.devId
+        masterDevType = connectInfo.masterDevInfo.type
+        try:
+            if masterDevType == DevType.Conntroller:
+                if connectInfo.slaveDevInfo1.type == 0 and connectInfo.slaveDevInfo2.type == 0:
+                    slaveId = -1
+                    slaveDevType = 0
+                    try:
+                        fwName = str(connectInfo.masterDevInfo.firmwareName, encoding="utf-8").strip(b'\x00'.decode())
+                        fwVer = str(connectInfo.masterDevInfo.firwareVersion, encoding="utf-8").strip(b'\x00'.decode())
+                        # print("masterId: ", masterId, connectInfo.slaveDevInfo1.devId, connectInfo.slaveDevInfo2.devId, fwName, fwVer)
+                    except Exception as e:
+                        print(e)
+                else:
+                    slaveId = connectInfo.slaveDevInfo1.devId if connectInfo.slaveDevInfo1.type != DevType.Idle else connectInfo.slaveDevInfo2.devId
+                    fwName = str(connectInfo.slaveDevInfo1.firmwareName, encoding="utf-8").strip(b'\x00'.decode()) if connectInfo.slaveDevInfo1.type != DevType.Idle else str(connectInfo.slaveDevInfo2.firmwareName, encoding="utf-8").strip(b'\x00'.decode())
+                    fwVer = str(connectInfo.slaveDevInfo1.firwareVersion, encoding="utf-8").strip(b'\x00'.decode()) if connectInfo.slaveDevInfo1.type != DevType.Idle else str(connectInfo.slaveDevInfo2.firwareVersion, encoding="utf-8").strip(b'\x00'.decode())
+                    slaveDevType = connectInfo.slaveDevInfo1.type if connectInfo.slaveDevInfo1.type != DevType.Idle else connectInfo.slaveDevInfo2.type
+                    # slaveDevType = dType.DevType.MagicianLite  # for test
             else:
-                slaveId = connectInfo.slaveDevInfo1.devId if connectInfo.slaveDevInfo1.type != DevType.Idle else connectInfo.slaveDevInfo2.devId
-                fwName = str(connectInfo.slaveDevInfo1.firmwareName, encoding="utf-8").strip(b'\x00'.decode()) if connectInfo.slaveDevInfo1.type != DevType.Idle else str(connectInfo.slaveDevInfo2.firmwareName, encoding="utf-8").strip(b'\x00'.decode())
-                fwVer = str(connectInfo.slaveDevInfo1.firwareVersion, encoding="utf-8").strip(b'\x00'.decode()) if connectInfo.slaveDevInfo1.type != DevType.Idle else str(connectInfo.slaveDevInfo2.firwareVersion, encoding="utf-8").strip(b'\x00'.decode())
-                slaveDevType = connectInfo.slaveDevInfo1.type if connectInfo.slaveDevInfo1.type != DevType.Idle else connectInfo.slaveDevInfo2.type
-                # slaveDevType = dType.DevType.MagicianLite  # for test
-        else:
-            slaveId = 0
-            slaveDevType = 0
-            fwName = str(connectInfo.masterDevInfo.firmwareName, encoding="utf-8").strip(b'\x00'.decode())
-            fwVer = str(connectInfo.masterDevInfo.firwareVersion, encoding="utf-8").strip(b'\x00'.decode())
+                slaveId = 0
+                slaveDevType = 0
+                fwName = str(connectInfo.masterDevInfo.firmwareName, encoding="utf-8").strip(b'\x00'.decode())
+                fwVer = str(connectInfo.masterDevInfo.firwareVersion, encoding="utf-8").strip(b'\x00'.decode())
 
-    except Exception as e:
-        print(e)
-    return [result, masterDevType, slaveDevType, fwName, fwVer, masterId, slaveId, connectInfo.masterDevInfo.runTime]
+        except Exception as e:
+            print(e)
+        return [result, masterDevType, slaveDevType, fwName, fwVer, masterId, slaveId, connectInfo.masterDevInfo.runTime]
 
 
 def DisconnectDobot(api):
