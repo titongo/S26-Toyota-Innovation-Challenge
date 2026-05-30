@@ -106,7 +106,7 @@ def phase_detect_plates():
         # blurred = cv2.medianBlur(gray, 7)
         blurred = cv2.bilateralFilter(gray, BILATERAL_DIAMETER, BILATERAL_SIGMA_COLOR, BILATERAL_SIGMA_SPACE)
         # set region of interest
-        x, y, w, h = [200, 100, 300, 200]  # adjust these values
+        x, y, w, h = [200, 210, 300, 200]  # adjust these values
 
         roi = blurred[y:y+h, x:x+w]
         
@@ -295,7 +295,7 @@ velcro  = Part(
     )
 purpleLegoBrick = Part(
         bounds=[
-            np.array([[125,100,80], [160,255,255]])
+            np.array([[125,100,80], [165,255,255]])
         ],
         minContourArea=20
     )
