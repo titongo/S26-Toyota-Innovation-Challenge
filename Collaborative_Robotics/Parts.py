@@ -13,7 +13,7 @@ import cv2
 #class for defining parts to be detected, with their color bounds and minimum contour area for detection
 class Part:
     def __init__(self, bounds: Sequence[np.ndarray], minContourArea: int, frame=None):
-        self.bounds = np.asarray(bounds, dtype=object)
+        self.bounds = np.asarray(bounds)
         self.minContourArea = minContourArea
         if frame is not None:
             self.hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (3,3), 0), cv2.COLOR_BGR2HSV)

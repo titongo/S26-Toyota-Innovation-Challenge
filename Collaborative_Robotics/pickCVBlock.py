@@ -16,8 +16,7 @@
 #dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, rHead): moves the robot to the specified (x, y, z) coordinates with a specified rotation for the end effector (rHead). Z_SAFE is a predefined constant that ensures the robot maintains a safe height to avoid collisions when moving horizontally.
 
 
-from Collaborative_Robotics.Parts import Part
-import Parts
+from Parts import Part
 import dobotArm
 import lib.DobotDllType as dType
 import numpy as np
@@ -287,14 +286,14 @@ dobotArm.open_gripper(api)
 dobotArm.stop_pump(api)
 velcro  = Part(
         bounds=[
-            [[0,120,70], [10,255,255]],   # lower red
-            [[170,120,70], [180,255,255]], # upper red
+            np.array([[0,120,70], [10,255,255]]),   # lower red
+            np.array([[170,120,70], [180,255,255]]), # upper red
         ],
         minContourArea=50
     )
 purpleLegoBrick = Part(
         bounds=[
-            [[125,100,80], [260,255,255]]
+            np.array([[125,100,80], [160,255,255]])
         ],
         minContourArea=20
     )
