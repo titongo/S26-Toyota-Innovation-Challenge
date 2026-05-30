@@ -9,7 +9,7 @@ Dobot Magician arm is capable in moving in the following highlighted areas. Befo
 ![FOV picture](<./25392_dobot range of motion.jpg>)
 
 ## Software Setup:
-1. Download the [Dobot Link](https://uofwaterloo-my.sharepoint.com/:u:/g/personal/mstachow_uwaterloo_ca/IQCMyzfbytafTpc4qCPQD6YwAbgJf8-Cn81QLpLcJRNMF0o?e=Ff2Rbj) and [Dobot Lab](https://uofwaterloo-my.sharepoint.com/:u:/g/personal/mstachow_uwaterloo_ca/IQBbYKSMl_JLSITR646OPVyuAQqpUINluDmnRVfS9tAhdjM?e=zsudQp)
+1. Download the [Dobot Link](https://www.dobot.us/download-center/) and [Dobot Lab](https://www.dobot.us/download-center/)
 2. Follow the instruction in the download files. It it normal for windows to flash multiple times after clicking a button. 
     - For each "install" button you must click install and let the installation run 3 times for the software to fully install.
 

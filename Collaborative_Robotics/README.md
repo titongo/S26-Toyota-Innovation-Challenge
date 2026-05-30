@@ -36,7 +36,7 @@ Suggested Developent: improve the vision detection for velcro tags so it is robu
 Suggested Development: Modify the computer vision program to send an alert when a human hand is in frame
 - approaches can include basic color detection, movement tracking, or object detection
 
-4. Avoid a human hand while picking up the part (Red Brake Caliper)
+5. Avoid a human hand while picking up the part (Red Brake Caliper)
 Suggested Development: think about how should the robot arm react to prevent collision with the human user. Is it stopping? Is it steering away? Is it something else?
 - determine how should the robot arm should be moving or controlled
 - determine if you should send a notification to the humans

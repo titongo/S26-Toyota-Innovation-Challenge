@@ -75,6 +75,10 @@ The goal is not just to build a model, but to show that it provides useful insig
 - **Toyota Telemetry Data** (accessed via [Google Drive](https://drive.google.com/drive/folders/1WH95WIw2kX9aDbsBe2MpxEcpnStesaIB?usp=sharing))
   - The dataset contains time-series telemetry from an 8-DOF robotic manipulator, including joint states, end-effector pose, and actuator diagnostics at each timestamp. Specifically, it records joint positions, Cartesian position and orientation along with per-joint electrical/mechanical signals such as current, temperature, torque, and load percentage.
     <br>
+
+- **Motor Stall Data** (accessed via motor_stall_data.zip)
+  -  The motor stall data was collected by Murad and it is for a reference for your challenge.
+    
 - **Open Source Data**
   - Students are also permitted to make use of any Open Source Datasets. You can find datasets on websites like [Kaggle](https://www.kaggle.com/datasets), [AWS Open Data Registry](https://registry.opendata.aws/) or [Microsoft Research Open Data](https://msropendata.com/).
   - Some Example Datasets are listed below:
