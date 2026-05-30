@@ -16,11 +16,17 @@ class Part:
         self.bounds = np.asarray(bounds)
         self.minContourArea = minContourArea
         if frame is not None:
-            self.hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (3,3), 0), cv2.COLOR_BGR2HSV)
+            self.updateFrame(frame)
         else:
+            self.frame = None
             self.hsv = None
 
+    def updateFrame(self, frame):
+        self.frame = frame
+        self.hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (3,3), 0), cv2.COLOR_BGR2HSV)
     def returnMask(self):
+        if self.hsv is None:
+            raise ValueError("hsv not set — pass frame at construction or set self.hsv first")
         mask = None
         for bound in self.bounds:
             if mask is None:

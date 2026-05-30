@@ -16,7 +16,7 @@
 #dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, rHead): moves the robot to the specified (x, y, z) coordinates with a specified rotation for the end effector (rHead). Z_SAFE is a predefined constant that ensures the robot maintains a safe height to avoid collisions when moving horizontally.
 
 
-from Parts import Part
+from Part import Part
 import dobotArm
 import lib.DobotDllType as dType
 import numpy as np
@@ -158,7 +158,8 @@ def phase_detect_targets(targetPart: Part):
         frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
         # Create a display copy so drawings don't affect next frame's HSV detection
         display_frame = frame.copy()
-        targetPart.frame = frame
+        targetPart.updateFrame(frame)
+        
         # Red Tag Logic
         mask = targetPart.returnMask()
         gitmask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
@@ -268,7 +269,7 @@ def phase_pick_place(target: Part):
         pick_target = phase_detect_targets(target)
         if pick_target is not None:
             next_state()
-
+    cap.release()
     while machine_state == "pick place":
         completed = phase_execute_batch(api, pick_target, drop_zone)
         if completed:
@@ -276,6 +277,7 @@ def phase_pick_place(target: Part):
         else: break
 
         pass
+    cap.open(cam_index, cam_backend)
 
 # ---------------------------------------------------------
 # MAIN EXECUTION
@@ -304,6 +306,7 @@ while machine_state == "scanning plate":
         next_state()
 
 phase_pick_place(velcro)
+machine_state = "scanning target"
 phase_pick_place(purpleLegoBrick)
 
 
