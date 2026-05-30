@@ -93,7 +93,7 @@ def phase_detect_plates():
         display_frame = frame.copy()
         
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.medianBlur(gray, 7)
+        blurred = cv2.bilateralFilter(gray, 15, 75, 75)
         # set region of interest
         x, y, w, h = [200, 150, 300, 300]  # adjust these values
 
