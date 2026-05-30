@@ -5,7 +5,7 @@ import numpy as np
 import cv2
 import os
 
-import libTeam21.autoSelectCamera as asc
+import libteam21
 
 # Useful Global Variables
 CON_STR = {
@@ -14,7 +14,7 @@ CON_STR = {
     dType.DobotConnect.DobotConnect_Occupied: "DobotConnect_Occupied"
 }
 
-cam_index, cam_backend = asc.autoSelectCamera()
+cam_index, cam_backend = libteam21.autoSelectCamera()
 cam = cv2.VideoCapture(cam_index, cam_backend)
 
 if not cam.isOpened():

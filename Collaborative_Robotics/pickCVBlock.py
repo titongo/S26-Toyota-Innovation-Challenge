@@ -23,6 +23,8 @@ import numpy as np
 import cv2
 import time
 
+import libteam21
+
 
 """CONSTANTS"""
 
@@ -36,7 +38,10 @@ machine_state = "scanning plate"
 # --- INITIALIZATION FOR CAMERA TRANSFORMATION ---
 # MAKE SURE THAT YOU HAVE RAN calibrateCamera.py FIRST TO GENERATE THE camera_params.npz FILE
 api = dType.load()
-cap = cv2.VideoCapture(0)
+
+cam_index, cam_backend = libteam21.autoSelectCamera()
+cap = cv2.VideoCapture(cam_index, cam_backend)
+
 H_matrix = np.load("HomographyMatrix.npy")
 data = np.load("./camera_params.npz")
 camera_matrix = data["camera_matrix"]
@@ -89,7 +94,7 @@ def phase_detect_plates():
         
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         blurred = cv2.medianBlur(gray, 7)
-        circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 150, param1=100, param2=35, minRadius=25, maxRadius=55)
+        circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 150, param1=50, param2=35, minRadius=25, maxRadius=55)
 
         current_list = []
         if circles is not None:
