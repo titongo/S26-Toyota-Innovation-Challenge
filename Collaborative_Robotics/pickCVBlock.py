@@ -99,15 +99,19 @@ def phase_detect_plates():
 
         roi = blurred[y:y+h, x:x+w]
         
-        cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+        cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
         circles = cv2.HoughCircles(roi, cv2.HOUGH_GRADIENT, 1, 150, param1=100, param2=35, minRadius=25, maxRadius=55)
 
         current_list = []
         if circles is not None:
             circles = np.uint16(np.around(circles))
             for i in circles[0, :]:
-                cv2.circle(display_frame, (i[0], i[1]), i[2], (0, 255, 0), 2)
-                rx, ry = pixel_to_robot(i[0], i[1], H_matrix)
+               # Convert from ROI-space to full-image space
+                full_x = i[0] + x      # Add ROI x offset (200)
+                full_y = i[1] + y      # Add ROI y offset (150)
+                
+                cv2.circle(display_frame, (full_x, full_y), i[2], (0, 255, 0), 2)
+                rx, ry = pixel_to_robot(full_x, full_y, H_matrix)
                 current_list.append((rx, ry))
 
         # --- AUTO-LOCK LOGIC ---
