@@ -96,13 +96,8 @@ def phase_detect_plates():
     stability_counter = 0
     last_count = 0
     
-    # Initialize Edge Drawing object for EDCircles
+    # Initialize Edge Drawing object for EDCircles (uses highly optimized default parameters)
     ed = cv2.ximgproc.createEdgeDrawing()
-    params = cv2.ximgproc.EdgeDrawing_Params()
-    params.EdgeDetectionOperator = cv2.ximgproc.EdgeDrawing_SOBEL
-    params.GradientThresholdValue = 20
-    params.AnchorThresholdValue = 8
-    ed.setParams(params)
     
     while True:
         ret, frame = cap.read()
