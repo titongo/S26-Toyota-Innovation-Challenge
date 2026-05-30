@@ -35,7 +35,7 @@ STABILITY_LIMIT = 60  #how many consecutive frames of stable detection before we
 PIXEL_TOLERANCE = 10  #object can move at most this # of pixels to be considered stationary
 
 #Angle to calibrate grip
-GRIPPER_ANGLE_OFFSET = 0   # degrees.
+GRIPPER_ANGLE_OFFSET = -45   # degrees.
 
 
 # --- PHASE 1 TUNING PARAMETERS (set via environment variables) ---
