@@ -35,6 +35,10 @@ def initialize_robot(api):
     if state != dType.DobotConnect.DobotConnect_NoError:
         print("Failed to connect to Dobot!")
         exit()
+        
+    # Clear any active alarms/errors on the robot (essential if the base LED is red)
+    print("Clearing all active alarms/errors on the Dobot...")
+    dType.ClearAllAlarmsState(api)
     
     """
         stop any queued commands and clear the queue. You HAVE TO do this every time you initialize the robot
