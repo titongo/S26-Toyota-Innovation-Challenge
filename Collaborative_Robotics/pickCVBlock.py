@@ -16,7 +16,7 @@
 #dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, rHead): moves the robot to the specified (x, y, z) coordinates with a specified rotation for the end effector (rHead). Z_SAFE is a predefined constant that ensures the robot maintains a safe height to avoid collisions when moving horizontally.
 
 
-
+from Part import Part
 import dobotArm
 import lib.DobotDllType as dType
 import numpy as np
@@ -115,7 +115,7 @@ def phase_detect_plates():
         # blurred = cv2.medianBlur(gray, 7)
         blurred = cv2.bilateralFilter(gray, BILATERAL_DIAMETER, BILATERAL_SIGMA_COLOR, BILATERAL_SIGMA_SPACE)
         # set region of interest
-        x, y, w, h = [200, 200, 300, 200]  # adjust these values
+        x, y, w, h = [200, 210, 300, 200]  # adjust these values
 
         roi = blurred[y:y+h, x:x+w]
         
@@ -153,11 +153,9 @@ def phase_detect_plates():
 
 
 # ---------------------------------------------------------
-# PHASE 2: DETECT Red velcros to pick up (Red Blocks)
-# this script assumes the targets to be picked up are red blocks
-# be aware your target maynot be red, and they may not be rectangular! You will need to modify the detection logic to fit your specific use case.
+# PHASE 2: DETECT the target parts
 # ---------------------------------------------------------
-def phase_detect_targets():
+def phase_detect_targets(targetPart: Part):
     print("\n[PHASE 2] Scanning for targets. Waiting for stability...")
     stability_counter = 0
     last_count = 0
@@ -169,19 +167,16 @@ def phase_detect_targets():
         frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
         # Create a display copy so drawings don't affect next frame's HSV detection
         display_frame = frame.copy()
+        targetPart.updateFrame(frame)
         
         # Red Tag Logic
-        hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (3,3), 0), cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, np.array([0,120,70]), np.array([10,255,255])) + \
-               cv2.inRange(hsv, np.array([170,120,70]), np.array([180,255,255]))
-            #Equivalent Purple Mask
-            #mask = cv2.inRange(hsv, np.array([125,100,70]), np.array([160,255,255]))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
+        mask = targetPart.returnMask()
+        gitmask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         current_list = []
         for cnt in contours:
-            if cv2.contourArea(cnt) > 50: #If we want sideways purple brick, change this to 20.
+            if cv2.contourArea(cnt) > targetPart.minContourArea:
                 M = cv2.moments(cnt)
                 if M["m00"] != 0:
                     cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
@@ -300,6 +295,23 @@ def phase_execute_batch(api, pick_list, drop_list):
     print("\nBatch Complete.")
     return True
  
+def phase_pick_place(target: Part):
+    print("\n[PHASE 3] Executing pick/place operations.")
+    # This function can be used if you want to execute pick/place one by one with more complex logic in between, rather than in batches.
+    while machine_state == "scanning target":
+    
+        pick_target = phase_detect_targets(target)
+        if pick_target is not None:
+            next_state()
+    cap.release()
+    while machine_state == "pick place":
+        completed = phase_execute_batch(api, pick_target, drop_zone)
+        if completed:
+            next_state()
+        else: break
+
+        pass
+    cap.open(cam_index, cam_backend)
 
 # ---------------------------------------------------------
 # MAIN EXECUTION
@@ -308,24 +320,28 @@ def phase_execute_batch(api, pick_list, drop_list):
 dobotArm.initialize_robot(api)
 dobotArm.open_gripper(api)
 dobotArm.stop_pump(api)
+velcro  = Part(
+        bounds=[
+            np.array([[0,120,70], [10,255,255]]),   # lower red
+            np.array([[170,120,70], [180,255,255]]), # upper red
+        ],
+        minContourArea=50
+    )
+purpleLegoBrick = Part(
+        bounds=[
+            np.array([[125,100,80], [165,255,255]])
+        ],
+        minContourArea=20
+    )
 
 while machine_state == "scanning plate":
     drop_zone = phase_detect_plates()
     if drop_zone is not None:
         next_state()
 
-
-while machine_state == "scanning target":
-    pick_target = phase_detect_targets()
-    if pick_target is not None:
-        next_state()
-
-
-while machine_state == "pick place":
-    completed = phase_execute_batch(api, pick_target, drop_zone)
-    if completed:
-        next_state()
-    else: break
+phase_pick_place(velcro)
+machine_state = "scanning target"
+phase_pick_place(purpleLegoBrick)
 
 
 cap.release()
