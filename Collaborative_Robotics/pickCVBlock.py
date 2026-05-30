@@ -72,7 +72,12 @@ def pixel_to_robot(u, v, H):
     xy /= xy[2]
     return xy[0], xy[1]
 
-
+def fold_angle(a):
+    # Fold into (-90, 90]. A 180-degree flip grips identically with a 2-jaw gripper,
+    # and this keeps rHead within the servo's range and avoids needless big rotations.
+    while a > 90:   a -= 180
+    while a <= -90: a += 180
+    return a
 # State machine logic to control the flow of the program through the three phases: scanning for plates, scanning for targets, and executing pick/place operations.
 # THIS STATE MACHINE IS TOO SIMPLE. Can you think of logics that should change the robot's sequnece of actions?
 # Ex: what if the robot fails to pick up a target? should it retry? should it go back to scanning for targets in case the target was moved? what if a new plate is added during the pick/place phase?
