@@ -601,7 +601,7 @@ def load():
         return CDLL(dylib_path, RTLD_GLOBAL)
     elif platform.system() == "Linux":
         so_path = os.path.join(module_dir, "libDobotDll.so")
-        return cdll.loadLibrary(so_path)
+        return CDLL(so_path, RTLD_GLOBAL)
 
 
 def dSleep(ms):
