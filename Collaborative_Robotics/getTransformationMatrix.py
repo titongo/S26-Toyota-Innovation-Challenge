@@ -5,6 +5,8 @@ import numpy as np
 import cv2
 import os
 
+import libTeam21.autoSelectCamera as asc
+
 # Useful Global Variables
 CON_STR = {
     dType.DobotConnect.DobotConnect_NoError:  "DobotConnect_NoError",
@@ -12,14 +14,15 @@ CON_STR = {
     dType.DobotConnect.DobotConnect_Occupied: "DobotConnect_Occupied"
 }
 
-cam = cv2.VideoCapture(0)
+cam_index, cam_backend = asc.autoSelectCamera()
+cam = cv2.VideoCapture(cam_index, cam_backend)
 
 if not cam.isOpened():
     print("Camera failed to open")
     exit()
     
 #if the program errors for file path problems, copy the relative path to camera_params.npz and paste it here and try again. 
-data = np.load("Collaborative_Robotics\camera_params.npz")
+data = np.load("Collaborative_Robotics/camera_params.npz")
 camera_matrix = data["camera_matrix"]
 dist_coeffs   = data["dist_coeffs"]
 
@@ -42,6 +45,31 @@ map1, map2 = cv2.initUndistortRectifyMap(
     (w,h),
     cv2.CV_16SC2
 )
+
+
+def preview_camera():
+
+    print("Camera preview: press SPACE to continue or ESC to quit")
+
+    while True:
+
+        ret, frame = cam.read()
+
+        if not ret:
+            print("Failed to read camera frame")
+            break
+
+        cv2.imshow("Camera Preview", frame)
+
+        key = cv2.waitKey(1) & 0xFF
+
+        if key == 32:
+            break
+
+        if key == 27:
+            cam.release()
+            cv2.destroyAllWindows()
+            exit()
 
 api = dType.load()
 
@@ -200,6 +228,8 @@ def compute_homography(pixel_points):
 
 def run():
     dobotArm.initialize_robot(api)
+
+    # preview_camera()
 
     pixel_points = collect_calibration()
 
