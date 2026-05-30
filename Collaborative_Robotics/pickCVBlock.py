@@ -51,14 +51,26 @@ api = dType.load()
 cam_index, cam_backend = libteam21.autoSelectCamera()
 cap = cv2.VideoCapture(cam_index, cam_backend)
 
+# If the auto-selected camera fails to read a frame, fall back to standard indices
+ret, frame = cap.read()
+if not ret or frame is None:
+    print(f"[WARNING] Auto-selected camera index {cam_index} failed to read. Falling back to index 2 (standard USB camera)...")
+    cap.release()
+    cap = cv2.VideoCapture(2) # Fall back to standard V4L2 index 2
+    ret, frame = cap.read()
+    if not ret or frame is None:
+        print("[WARNING] Index 2 failed. Falling back to index 0 (default webcam)...")
+        cap.release()
+        cap = cv2.VideoCapture(0)
+        ret, frame = cap.read()
+
 H_matrix = np.load("HomographyMatrix.npy")
 data = np.load("./camera_params.npz")
 camera_matrix = data["camera_matrix"]
 dist_coeffs   = data["dist_coeffs"]
 
 # Compute undistort maps once
-ret, frame = cap.read()
-h, w = frame.shape[:2]
+h, w = frame.shape[:2] if frame is not None else (480, 640)
 new_K, roi = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (w,h), 1)
 map1, map2 = cv2.initUndistortRectifyMap(camera_matrix, dist_coeffs, None, new_K, (w,h), cv2.CV_16SC2)
 
