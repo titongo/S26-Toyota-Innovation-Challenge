@@ -24,7 +24,7 @@ import cv2
 import time
 import os
 
-import libteam21b
+import libteam21
 
 
 """CONSTANTS"""
