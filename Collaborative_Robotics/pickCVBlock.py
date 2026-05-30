@@ -92,10 +92,17 @@ def next_state():
 # this script assumes a metallic circular plate as the drop zone, but you can modify the detection logic to fit your specific use case.
 # ---------------------------------------------------------
 def phase_detect_plates():
-    print("\n[PHASE 1] Scanning for drop zones. Waiting for stability...")
-    print(f"[DEBUG] Using parameters - BilateralFilter({BILATERAL_DIAMETER}, {BILATERAL_SIGMA_COLOR}, {BILATERAL_SIGMA_SPACE}), HoughCircles(param1={HOUGH_PARAM1}, param2={HOUGH_PARAM2})")
+    print("\n[PHASE 1] Scanning for drop zones (using EDCircles). Waiting for stability...")
     stability_counter = 0
     last_count = 0
+    
+    # Initialize Edge Drawing object for EDCircles
+    ed = cv2.ximgproc.createEdgeDrawing()
+    params = cv2.ximgproc.EdgeDrawing_Params()
+    params.EdgeDetectionOperator = cv2.ximgproc.EdgeDrawing_SOBEL
+    params.GradientThresholdValue = 20
+    params.AnchorThresholdValue = 8
+    ed.setParams(params)
     
     while True:
         ret, frame = cap.read()
@@ -103,7 +110,6 @@ def phase_detect_plates():
         display_frame = frame.copy()
         
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        # blurred = cv2.medianBlur(gray, 7)
         blurred = cv2.bilateralFilter(gray, BILATERAL_DIAMETER, BILATERAL_SIGMA_COLOR, BILATERAL_SIGMA_SPACE)
         # set region of interest
         x, y, w, h = [200, 100, 300, 200]  # adjust these values
@@ -111,19 +117,33 @@ def phase_detect_plates():
         roi = blurred[y:y+h, x:x+w]
         
         cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-        circles = cv2.HoughCircles(roi, cv2.HOUGH_GRADIENT, 1, 150, param1=HOUGH_PARAM1, param2=HOUGH_PARAM2, minRadius=25, maxRadius=55)
+        
+        # Run EDCircles on the ROI
+        ed.detectEdges(roi)
+        ellipses = ed.detectEllipses()
 
         current_list = []
-        if circles is not None:
-            circles = np.uint16(np.around(circles))
-            for i in circles[0, :]:
-               # Convert from ROI-space to full-image space
-                full_x = i[0] + x      # Add ROI x offset (200)
-                full_y = i[1] + y      # Add ROI y offset (150)
+        if ellipses is not None:
+            for ellipse in ellipses[0]:
+                # If element index 2 > 0, it was detected as a pure circle by EDCircles
+                if ellipse[2] > 0:
+                    cx_roi, cy_roi, r = int(ellipse[0]), int(ellipse[1]), int(ellipse[2])
+                else:
+                    # Else check if the ellipse is highly circular (semi-major / semi-minor < 1.2)
+                    r_major, r_minor = ellipse[3], ellipse[4]
+                    if r_minor > 0 and (r_major / r_minor) < 1.2:
+                        cx_roi, cy_roi, r = int(ellipse[0]), int(ellipse[1]), int((r_major + r_minor) / 2)
+                    else:
+                        continue
                 
-                cv2.circle(display_frame, (full_x, full_y), i[2], (0, 255, 0), 2)
-                rx, ry = pixel_to_robot(full_x, full_y, H_matrix)
-                current_list.append((rx, ry))
+                # Filter circles in the expected radius range (25 to 55 pixels)
+                if 25 <= r <= 55:
+                    full_x = cx_roi + x      # Add ROI x offset (200)
+                    full_y = cy_roi + y      # Add ROI y offset (100)
+                    
+                    cv2.circle(display_frame, (full_x, full_y), r, (0, 255, 0), 2)
+                    rx, ry = pixel_to_robot(full_x, full_y, H_matrix)
+                    current_list.append((rx, ry))
 
         # --- AUTO-LOCK LOGIC ---
         if len(current_list) > 0 and len(current_list) == last_count:
