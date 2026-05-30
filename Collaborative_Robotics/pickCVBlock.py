@@ -114,8 +114,10 @@ def phase_detect_plates():
     # Universal parameters initialization (works perfectly on both Windows and Linux)
     params = ed.Params()
     params.EdgeDetectionOperator = cv2.ximgproc.EdgeDrawing_SOBEL
-    params.GradientThresholdValue = 20
-    params.AnchorThresholdValue = 8
+    params.GradientThresholdValue = 12  # Lower to capture softer/reflective metallic edges
+    params.AnchorThresholdValue = 2     # Lower to extract more edge anchors
+    params.NFAValidation = False        # Disable strict false alarm validation to detect shiny/broken discs
+    params.MinPathLength = 10
     ed.setParams(params)
     
     while True:
@@ -135,6 +137,10 @@ def phase_detect_plates():
         # Run EDCircles on the ROI
         ed.detectEdges(roi)
         ellipses = ed.detectEllipses()
+        
+        # Show debug edge map to see live edge segment extraction
+        edge_img = ed.getEdgeImage()
+        cv2.imshow("ED Edge Map (Debug)", edge_img)
 
         current_list = []
         if ellipses is not None:
