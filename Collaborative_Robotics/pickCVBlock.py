@@ -100,7 +100,7 @@ def phase_detect_plates():
         roi = blurred[y:y+h, x:x+w]
         
         cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-        circles = cv2.HoughCircles(roi, cv2.HOUGH_GRADIENT, 1, 150, param1=100, param2=35, minRadius=25, maxRadius=55)
+        circles = cv2.HoughCircles(roi, cv2.HOUGH_GRADIENT, 1, 150, param1=100, param2=25, minRadius=25, maxRadius=55)
 
         current_list = []
         if circles is not None:
