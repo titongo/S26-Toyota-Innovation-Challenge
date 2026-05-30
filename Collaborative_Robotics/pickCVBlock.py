@@ -170,7 +170,7 @@ def phase_detect_targets():
 
         current_list = []
         for cnt in contours:
-            if cv2.contourArea(cnt) > 800:
+            if cv2.contourArea(cnt) > 50:
                 M = cv2.moments(cnt)
                 if M["m00"] != 0:
                     cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
