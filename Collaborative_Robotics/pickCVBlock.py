@@ -22,6 +22,7 @@ import lib.DobotDllType as dType
 import numpy as np
 import cv2
 import time
+import os
 
 import libteam21
 
@@ -29,11 +30,19 @@ import libteam21
 """CONSTANTS"""
 
 Z_SAFE = 40 #what is the clearance distance for the robot arm to avoid collisions when moving horizontally?
-Z_PICK = -25 #what is the  height for the robot claw to successfully pick up the target?
+Z_PICK = -64 #what is the  height for the robot claw to successfully pick up the target?
 STABILITY_LIMIT = 60  #how many consecutive frames of stable detection before we "lock in" the positions and move to the next phase? (at 30fps, 60 frames is about 2 seconds)
 PIXEL_TOLERANCE = 10  #object can move at most this # of pixels to be considered stationary
 
-machine_state = "scanning plate" 
+# --- PHASE 1 TUNING PARAMETERS (set via environment variables) ---
+# For shiny metal disk detection, use lower param1/param2 and aggressive bilateral filtering
+BILATERAL_DIAMETER = int(os.getenv("BILATERAL_D", 9))
+BILATERAL_SIGMA_COLOR = int(os.getenv("BILATERAL_SC", 40))
+BILATERAL_SIGMA_SPACE = int(os.getenv("BILATERAL_SS", 40))
+HOUGH_PARAM1 = int(os.getenv("HOUGH_PARAM1", 80))  # Lower for reflective surfaces
+HOUGH_PARAM2 = int(os.getenv("HOUGH_PARAM2", 20))  # Lower for reflective surfaces
+
+machine_state = "scanning plate"
 
 # --- INITIALIZATION FOR CAMERA TRANSFORMATION ---
 # MAKE SURE THAT YOU HAVE RAN calibrateCamera.py FIRST TO GENERATE THE camera_params.npz FILE
@@ -84,6 +93,7 @@ def next_state():
 # ---------------------------------------------------------
 def phase_detect_plates():
     print("\n[PHASE 1] Scanning for drop zones. Waiting for stability...")
+    print(f"[DEBUG] Using parameters - BilateralFilter({BILATERAL_DIAMETER}, {BILATERAL_SIGMA_COLOR}, {BILATERAL_SIGMA_SPACE}), HoughCircles(param1={HOUGH_PARAM1}, param2={HOUGH_PARAM2})")
     stability_counter = 0
     last_count = 0
     
@@ -93,14 +103,15 @@ def phase_detect_plates():
         display_frame = frame.copy()
         
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.bilateralFilter(gray, 15, 75, 75)
+        # blurred = cv2.medianBlur(gray, 7)
+        blurred = cv2.bilateralFilter(gray, BILATERAL_DIAMETER, BILATERAL_SIGMA_COLOR, BILATERAL_SIGMA_SPACE)
         # set region of interest
-        x, y, w, h = [200, 150, 300, 300]  # adjust these values
+        x, y, w, h = [200, 100, 300, 200]  # adjust these values
 
         roi = blurred[y:y+h, x:x+w]
         
         cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-        circles = cv2.HoughCircles(roi, cv2.HOUGH_GRADIENT, 1, 150, param1=100, param2=25, minRadius=25, maxRadius=55)
+        circles = cv2.HoughCircles(roi, cv2.HOUGH_GRADIENT, 1, 150, param1=HOUGH_PARAM1, param2=HOUGH_PARAM2, minRadius=25, maxRadius=55)
 
         current_list = []
         if circles is not None:
