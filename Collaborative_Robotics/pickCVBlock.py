@@ -22,21 +22,39 @@ import lib.DobotDllType as dType
 import numpy as np
 import cv2
 import time
+import os
+
+import libteam21
 
 
 """CONSTANTS"""
 
 Z_SAFE = 40 #what is the clearance distance for the robot arm to avoid collisions when moving horizontally?
-Z_PICK = -25 #what is the  height for the robot claw to successfully pick up the target?
+Z_PICK = -64 #what is the  height for the robot claw to successfully pick up the target?
 STABILITY_LIMIT = 60  #how many consecutive frames of stable detection before we "lock in" the positions and move to the next phase? (at 30fps, 60 frames is about 2 seconds)
 PIXEL_TOLERANCE = 10  #object can move at most this # of pixels to be considered stationary
 
-machine_state = "scanning plate" 
+#Angle to calibrate grip
+GRIPPER_ANGLE_OFFSET = -45   # degrees.
+
+
+# --- PHASE 1 TUNING PARAMETERS (set via environment variables) ---
+# For shiny metal disk detection, use lower param1/param2 and aggressive bilateral filtering
+BILATERAL_DIAMETER = int(os.getenv("BILATERAL_D", 9))
+BILATERAL_SIGMA_COLOR = int(os.getenv("BILATERAL_SC", 40))
+BILATERAL_SIGMA_SPACE = int(os.getenv("BILATERAL_SS", 40))
+HOUGH_PARAM1 = int(os.getenv("HOUGH_PARAM1", 80))  # Lower for reflective surfaces
+HOUGH_PARAM2 = int(os.getenv("HOUGH_PARAM2", 20))  # Lower for reflective surfaces
+
+machine_state = "scanning plate"
 
 # --- INITIALIZATION FOR CAMERA TRANSFORMATION ---
 # MAKE SURE THAT YOU HAVE RAN calibrateCamera.py FIRST TO GENERATE THE camera_params.npz FILE
 api = dType.load()
-cap = cv2.VideoCapture(0)
+
+cam_index, cam_backend = libteam21.autoSelectCamera()
+cap = cv2.VideoCapture(cam_index, cam_backend)
+
 H_matrix = np.load("HomographyMatrix.npy")
 data = np.load("./camera_params.npz")
 camera_matrix = data["camera_matrix"]
@@ -54,7 +72,12 @@ def pixel_to_robot(u, v, H):
     xy /= xy[2]
     return xy[0], xy[1]
 
-
+def fold_angle(a):
+    # Fold into (-90, 90]. A 180-degree flip grips identically with a 2-jaw gripper,
+    # and this keeps rHead within the servo's range and avoids needless big rotations.
+    while a > 90:   a -= 180
+    while a <= -90: a += 180
+    return a
 # State machine logic to control the flow of the program through the three phases: scanning for plates, scanning for targets, and executing pick/place operations.
 # THIS STATE MACHINE IS TOO SIMPLE. Can you think of logics that should change the robot's sequnece of actions?
 # Ex: what if the robot fails to pick up a target? should it retry? should it go back to scanning for targets in case the target was moved? what if a new plate is added during the pick/place phase?
@@ -79,6 +102,7 @@ def next_state():
 # ---------------------------------------------------------
 def phase_detect_plates():
     print("\n[PHASE 1] Scanning for drop zones. Waiting for stability...")
+    print(f"[DEBUG] Using parameters - BilateralFilter({BILATERAL_DIAMETER}, {BILATERAL_SIGMA_COLOR}, {BILATERAL_SIGMA_SPACE}), HoughCircles(param1={HOUGH_PARAM1}, param2={HOUGH_PARAM2})")
     stability_counter = 0
     last_count = 0
     
@@ -88,15 +112,26 @@ def phase_detect_plates():
         display_frame = frame.copy()
         
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.medianBlur(gray, 7)
-        circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 150, param1=100, param2=35, minRadius=25, maxRadius=55)
+        # blurred = cv2.medianBlur(gray, 7)
+        blurred = cv2.bilateralFilter(gray, BILATERAL_DIAMETER, BILATERAL_SIGMA_COLOR, BILATERAL_SIGMA_SPACE)
+        # set region of interest
+        x, y, w, h = [200, 200, 300, 200]  # adjust these values
+
+        roi = blurred[y:y+h, x:x+w]
+        
+        cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+        circles = cv2.HoughCircles(roi, cv2.HOUGH_GRADIENT, 1, 150, param1=HOUGH_PARAM1, param2=HOUGH_PARAM2, minRadius=25, maxRadius=55)
 
         current_list = []
         if circles is not None:
             circles = np.uint16(np.around(circles))
             for i in circles[0, :]:
-                cv2.circle(display_frame, (i[0], i[1]), i[2], (0, 255, 0), 2)
-                rx, ry = pixel_to_robot(i[0], i[1], H_matrix)
+               # Convert from ROI-space to full-image space
+                full_x = i[0] + x      # Add ROI x offset (200)
+                full_y = i[1] + y      # Add ROI y offset (150)
+                
+                cv2.circle(display_frame, (full_x, full_y), i[2], (0, 255, 0), 2)
+                rx, ry = pixel_to_robot(full_x, full_y, H_matrix)
                 current_list.append((rx, ry))
 
         # --- AUTO-LOCK LOGIC ---
@@ -115,7 +150,7 @@ def phase_detect_plates():
             print(f"Locked {len(current_list)} plates.")
             return current_list
   
- 
+
 
 # ---------------------------------------------------------
 # PHASE 2: DETECT Red velcros to pick up (Red Blocks)
@@ -139,19 +174,46 @@ def phase_detect_targets():
         hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (3,3), 0), cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, np.array([0,120,70]), np.array([10,255,255])) + \
                cv2.inRange(hsv, np.array([170,120,70]), np.array([180,255,255]))
+            #Equivalent Purple Mask
+            #mask = cv2.inRange(hsv, np.array([125,100,70]), np.array([160,255,255]))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         current_list = []
         for cnt in contours:
-            if cv2.contourArea(cnt) > 800:
+            if cv2.contourArea(cnt) > 50: #If we want sideways purple brick, change this to 20.
                 M = cv2.moments(cnt)
                 if M["m00"] != 0:
                     cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
-                    rx, ry = pixel_to_robot(cx, cy, H_matrix)
-                    current_list.append((rx, ry))
-                    # Draw on display_frame only
-                    cv2.drawContours(display_frame, [cnt], -1, (0, 255, 0), 2)
+
+                    # --- This creates a bounding box rectangle, and gives back its dimensions
+                    rect = cv2.minAreaRect(cnt)          # ((px,py),(w,h),angle) in PIXELS
+                    box  = cv2.boxPoints(rect)           # 4 corner points (float)
+
+                    # Calculation for finding the angle, using the shorter edge, to close upon
+                    e1, e2 = box[1] - box[0], box[2] - box[1]
+                    short_vec = e1 if np.linalg.norm(e1) < np.linalg.norm(e2) else e2
+                    n = np.linalg.norm(short_vec)
+                    if n < 1e-6:
+                        continue
+                    short_vec /= n      # (unit) vector
+
+                    # Measure the angle in ROBOT space, not pixels: map the centre and a
+                    # point one step along the short axis through the homography, then take
+                    # the angle between them in mm. This auto-corrects for camera rotation.
+                    STEP = 20  # pixels
+                    rx0, ry0 = pixel_to_robot(cx, cy, H_matrix)
+                    rx1, ry1 = pixel_to_robot(cx + short_vec[0]*STEP,
+                                            cy + short_vec[1]*STEP, H_matrix) # creates a delta-r
+                    grip_angle = fold_angle(np.degrees(np.arctan2(ry1 - ry0, rx1 - rx0))
+                                            + GRIPPER_ANGLE_OFFSET) #This find the angle using trig
+
+                    current_list.append((rx0, ry0, grip_angle))   # <-- now a 3-tuple
+
+                    # visual feedback
+                    cv2.drawContours(display_frame, [box.astype(np.int32)], -1, (0, 255, 0), 2)
+                    cv2.putText(display_frame, f"{grip_angle:.0f}", (cx, cy),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
                     
         cv2.waitKey(1)
 
@@ -198,19 +260,19 @@ def phase_execute_batch(api, pick_list, drop_list):
     print(f"\n[PHASE 3] Executing batch of {batch_size} operations.")
 
     for i in range(batch_size):
-        pick_x, pick_y = pick_list[i]
+        pick_x, pick_y, pick_angle = pick_list[i]   # angle value added
         drop_x, drop_y = drop_list[i]
 
-        print(f"Task {i+1}: Moving {pick_x, pick_y} to {drop_x, drop_y}")
+        print(f"Task {i+1}: Moving {pick_x, pick_y} to {drop_x, drop_y}, rotated to angle {pick_angle}")
 
         # --- PICK SEQUENCE ---
-        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
-        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK)
+        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, pick_angle)
+        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK, pick_angle)
         #optional alternate function call method to include a rotation of the gripper angle
         #dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, 45) 
 
         dobotArm.close_gripper(api)
-        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, pick_angle)
 
         # --- PLACE SEQUENCE ---
         dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
