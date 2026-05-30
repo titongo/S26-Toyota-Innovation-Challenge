@@ -161,9 +161,8 @@ def phase_detect_targets(targetPart: Part):
         frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
         # Create a display copy so drawings don't affect next frame's HSV detection
         display_frame = frame.copy()
-        
+        targetPart.frame = frame
         # Red Tag Logic
-        hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (3,3), 0), cv2.COLOR_BGR2HSV)
         mask = targetPart.returnMask()
         gitmask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
