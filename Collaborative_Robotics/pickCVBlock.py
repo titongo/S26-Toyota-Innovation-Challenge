@@ -30,9 +30,13 @@ import libteam21
 """CONSTANTS"""
 
 Z_SAFE = 40 #what is the clearance distance for the robot arm to avoid collisions when moving horizontally?
-Z_PICK = -60 #what is the  height for the robot claw to successfully pick up the target?
+Z_PICK = -64 #what is the  height for the robot claw to successfully pick up the target?
 STABILITY_LIMIT = 60  #how many consecutive frames of stable detection before we "lock in" the positions and move to the next phase? (at 30fps, 60 frames is about 2 seconds)
 PIXEL_TOLERANCE = 10  #object can move at most this # of pixels to be considered stationary
+
+#Angle to calibrate grip
+GRIPPER_ANGLE_OFFSET = 0   # degrees.
+
 
 # --- PHASE 1 TUNING PARAMETERS (set via environment variables) ---
 # For shiny metal disk detection, use lower param1/param2 and aggressive bilateral filtering
@@ -41,39 +45,6 @@ BILATERAL_SIGMA_COLOR = int(os.getenv("BILATERAL_SC", 40))
 BILATERAL_SIGMA_SPACE = int(os.getenv("BILATERAL_SS", 40))
 HOUGH_PARAM1 = int(os.getenv("HOUGH_PARAM1", 80))  # Lower for reflective surfaces
 HOUGH_PARAM2 = int(os.getenv("HOUGH_PARAM2", 20))  # Lower for reflective surfaces
-
-# --- PHASE 2 TUNING PARAMETERS (set via environment variables) ---
-# Example: ACTIVE_COLORS="purple,red"
-ACTIVE_COLORS = [c.strip().lower() for c in os.getenv("ACTIVE_COLORS", "purple").split(",") if c.strip()]
-TARGET_MIN_AREA = int(os.getenv("TARGET_MIN_AREA", 20))
-
-# OpenCV HSV hue range is 0-179. Some colors (like red) need two hue bands.
-HSV_COLOR_RANGES = {
-    "red": [
-        (np.array([0, 120, 70]), np.array([10, 255, 255])),
-        (np.array([170, 120, 70]), np.array([180, 255, 255])),
-    ],
-    "purple": [
-        (np.array([120, 100, 70]), np.array([160, 255, 255])),
-    ],
-    "blue": [
-        (np.array([95, 100, 70]), np.array([130, 255, 255])),
-    ],
-    "green": [
-        (np.array([35, 80, 70]), np.array([90, 255, 255])),
-    ],
-}
-
-
-def build_multi_color_mask(hsv_frame, active_colors):
-    mask = np.zeros(hsv_frame.shape[:2], dtype=np.uint8)
-    for color in active_colors:
-        ranges = HSV_COLOR_RANGES.get(color)
-        if not ranges:
-            continue
-        for lower, upper in ranges:
-            mask = cv2.bitwise_or(mask, cv2.inRange(hsv_frame, lower, upper))
-    return mask
 
 machine_state = "scanning plate"
 
@@ -174,7 +145,7 @@ def phase_detect_plates():
             print(f"Locked {len(current_list)} plates.")
             return current_list
   
- 
+
 
 # ---------------------------------------------------------
 # PHASE 2: DETECT Red velcros to pick up (Red Blocks)
@@ -183,7 +154,6 @@ def phase_detect_plates():
 # ---------------------------------------------------------
 def phase_detect_targets():
     print("\n[PHASE 2] Scanning for targets. Waiting for stability...")
-    print(f"[DEBUG] ACTIVE_COLORS={ACTIVE_COLORS}, TARGET_MIN_AREA={TARGET_MIN_AREA}")
     stability_counter = 0
     last_count = 0
     
@@ -195,22 +165,50 @@ def phase_detect_targets():
         # Create a display copy so drawings don't affect next frame's HSV detection
         display_frame = frame.copy()
         
-        # Target color mask logic (supports multiple colors)
+        # Red Tag Logic
         hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (3,3), 0), cv2.COLOR_BGR2HSV)
-        mask = build_multi_color_mask(hsv, ACTIVE_COLORS)
+        mask = cv2.inRange(hsv, np.array([0,120,70]), np.array([10,255,255])) + \
+               cv2.inRange(hsv, np.array([170,120,70]), np.array([180,255,255]))
+            #Equivalent Purple Mask
+            #mask = cv2.inRange(hsv, np.array([125,100,70]), np.array([160,255,255]))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         current_list = []
         for cnt in contours:
-            if cv2.contourArea(cnt) > TARGET_MIN_AREA:
+            if cv2.contourArea(cnt) > 50: #If we want sideways purple brick, change this to 20.
                 M = cv2.moments(cnt)
                 if M["m00"] != 0:
                     cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
-                    rx, ry = pixel_to_robot(cx, cy, H_matrix)
-                    current_list.append((rx, ry))
-                    # Draw on display_frame only
-                    cv2.drawContours(display_frame, [cnt], -1, (0, 255, 0), 2)
+
+                    # --- This creates a bounding box rectangle, and gives back its dimensions
+                    rect = cv2.minAreaRect(cnt)          # ((px,py),(w,h),angle) in PIXELS
+                    box  = cv2.boxPoints(rect)           # 4 corner points (float)
+
+                    # Calculation for finding the angle, using the shorter edge, to close upon
+                    e1, e2 = box[1] - box[0], box[2] - box[1]
+                    short_vec = e1 if np.linalg.norm(e1) < np.linalg.norm(e2) else e2
+                    n = np.linalg.norm(short_vec)
+                    if n < 1e-6:
+                        continue
+                    short_vec /= n      # (unit) vector
+
+                    # Measure the angle in ROBOT space, not pixels: map the centre and a
+                    # point one step along the short axis through the homography, then take
+                    # the angle between them in mm. This auto-corrects for camera rotation.
+                    STEP = 20  # pixels
+                    rx0, ry0 = pixel_to_robot(cx, cy, H_matrix)
+                    rx1, ry1 = pixel_to_robot(cx + short_vec[0]*STEP,
+                                            cy + short_vec[1]*STEP, H_matrix) # creates a delta-r
+                    grip_angle = fold_angle(np.degrees(np.arctan2(ry1 - ry0, rx1 - rx0))
+                                            + GRIPPER_ANGLE_OFFSET) #This find the angle using trig
+
+                    current_list.append((rx0, ry0, grip_angle))   # <-- now a 3-tuple
+
+                    # visual feedback
+                    cv2.drawContours(display_frame, [box.astype(np.int32)], -1, (0, 255, 0), 2)
+                    cv2.putText(display_frame, f"{grip_angle:.0f}", (cx, cy),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
                     
         cv2.waitKey(1)
 
@@ -257,19 +255,19 @@ def phase_execute_batch(api, pick_list, drop_list):
     print(f"\n[PHASE 3] Executing batch of {batch_size} operations.")
 
     for i in range(batch_size):
-        pick_x, pick_y = pick_list[i]
+        pick_x, pick_y, pick_angle = pick_list[i]   # angle value added
         drop_x, drop_y = drop_list[i]
 
-        print(f"Task {i+1}: Moving {pick_x, pick_y} to {drop_x, drop_y}")
+        print(f"Task {i+1}: Moving {pick_x, pick_y} to {drop_x, drop_y}, rotated to angle {pick_angle}")
 
         # --- PICK SEQUENCE ---
-        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
-        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK)
+        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, pick_angle)
+        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK, pick_angle)
         #optional alternate function call method to include a rotation of the gripper angle
         #dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, 45) 
 
         dobotArm.close_gripper(api)
-        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, pick_angle)
 
         # --- PLACE SEQUENCE ---
         dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
