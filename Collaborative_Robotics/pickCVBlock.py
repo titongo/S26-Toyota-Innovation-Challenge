@@ -145,9 +145,7 @@ def phase_detect_plates():
  
 
 # ---------------------------------------------------------
-# PHASE 2: DETECT Red velcros to pick up (Red Blocks)
-# this script assumes the targets to be picked up are red blocks
-# be aware your target maynot be red, and they may not be rectangular! You will need to modify the detection logic to fit your specific use case.
+# PHASE 2: DETECT the target parts
 # ---------------------------------------------------------
 def phase_detect_targets(targetPart: Part):
     print("\n[PHASE 2] Scanning for targets. Waiting for stability...")
