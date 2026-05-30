@@ -7,3 +7,4 @@ Fault_Prediction/MotorStallTestSetup/!data/sample_data.csv
 Fault_Prediction/MotorStallTestSetup/plots/*
 Fault_Prediction/MotorStallTestSetup/!plots/sample_plot.png
 .vscode/sftp.json
+/.venv/*
