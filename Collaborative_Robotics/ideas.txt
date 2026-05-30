@@ -1,0 +1,3 @@
+- Handoff robot? 
+- Stops motion if detects hand in area
+- give okay or thumbs up to continue working
