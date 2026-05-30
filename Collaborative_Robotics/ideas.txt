@@ -1,3 +1,29 @@
 - Handoff robot? 
 - Stops motion if detects hand in area
 - give okay or thumbs up to continue working
+
+
+Tian's ideas (ordered from easiest to hardest to implement):
+1.  Coding the arm to rotate to the shortest axis of a rectangle to pick up the object 
+      - (There is no rotation code in the current implementation, just go to xyz)
+      - We'd have to fit a rectangle / find the shortest axis
+
+2. Turning the image-detection code from simple pixel-finding algorithms to a ML-based approach using OpenCV
+      a) Find library / model for autonomotive parts (or anything similar)
+      b) make the thing
+
+3. Implementing image-depth (depends on if we have a depth camera. if not, maybe consider buying lidar sensor?)
+      a) Add depth to code
+      b) Expand robot to find all obstacles
+      c) Add bounding box around robot arm so it doesn't intersect anything
+      c) Add pathfinding algorithm 
+
+4. Human hand avoidance (requires ^ 3. )
+      - Needs to not require 2 seconds to settle (like all other code) - detect quick motion 
+            - maybe START with some sort of color-picking algorithm for "human colored" hands? (might accidently create a slightly racist 
+              robot)
+                  - this can use existing pixel-finding code
+      - eventually add openCV library, try to find one that can find human hands, then if confidence > some threshold, stop robot / move it away until hand exists frame for >n seconds.
+
+
+      
