@@ -1,0 +1,475 @@
+#This code is a simplified implementation of a collaborative robotics system that detects plates and targets using computer vision, 
+#and then commands a Dobot robotic arm to pick and place objects accordingly. The system operates in three phases: scanning for plates, 
+#scanning for targets, and executing the pick/place operations. 
+#Stability checks are implemented to ensure reliable detection before proceeding to the next phase.
+
+# Note: there are parameters that are useful to the successful operation of the robot arm. Read through the code before running the program.
+
+# How to use: 
+# 1. Ensure you have the Dobot robotic arm set up and connected to your computer.
+# 2. Place the plates (drop zones) and targets (red blocks) within the camera's
+# field of view.
+# 3. Run the script. The system will first scan for plates, then targets, and finally execute the pick/place operations based on the detected positions.
+# 4. Monitor the console output and the video feed for feedback on the system's status and operations
+
+#Other Useful Codes you can use:
+#dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, rHead): moves the robot to the specified (x, y, z) coordinates with a specified rotation for the end effector (rHead). Z_SAFE is a predefined constant that ensures the robot maintains a safe height to avoid collisions when moving horizontally.
+
+
+
+import dobotArm
+import lib.DobotDllType as dType
+import numpy as np
+import cv2
+import time
+import os
+
+import libteam21
+
+
+"""CONSTANTS"""
+
+Z_SAFE = 40 #what is the clearance distance for the robot arm to avoid collisions when moving horizontally?
+Z_PICK = -60 #what is the  height for the robot claw to successfully pick up the target?
+STABILITY_LIMIT = 60  #how many consecutive frames of stable detection before we "lock in" the positions and move to the next phase? (at 30fps, 60 frames is about 2 seconds)
+PIXEL_TOLERANCE = 10  #object can move at most this # of pixels to be considered stationary
+
+# --- SAFETY PARAMETERS: HAND DETECTION / PAUSE ---
+HAND_MIN_AREA = int(os.getenv("HAND_MIN_AREA", 2500))
+HAND_CLEAR_FRAMES = int(os.getenv("HAND_CLEAR_FRAMES", 30))  # hand must be gone for this many frames before resuming
+HAND_ROI = None  # example: (150, 50, 450, 350). Keep None to check the whole image
+
+
+# --- PHASE 1 TUNING PARAMETERS (set via environment variables) ---
+# For shiny metal disk detection, use lower param1/param2 and aggressive bilateral filtering
+BILATERAL_DIAMETER = int(os.getenv("BILATERAL_D", 9))
+BILATERAL_SIGMA_COLOR = int(os.getenv("BILATERAL_SC", 40))
+BILATERAL_SIGMA_SPACE = int(os.getenv("BILATERAL_SS", 40))
+HOUGH_PARAM1 = int(os.getenv("HOUGH_PARAM1", 80))  # Lower for reflective surfaces
+HOUGH_PARAM2 = int(os.getenv("HOUGH_PARAM2", 20))  # Lower for reflective surfaces
+
+# --- PHASE 2 TUNING PARAMETERS (set via environment variables) ---
+# Example: ACTIVE_COLORS="purple,red"
+ACTIVE_COLORS = [c.strip().lower() for c in os.getenv("ACTIVE_COLORS", "purple").split(",") if c.strip()]
+TARGET_MIN_AREA = int(os.getenv("TARGET_MIN_AREA", 20))
+
+# OpenCV HSV hue range is 0-179. Some colors (like red) need two hue bands.
+HSV_COLOR_RANGES = {
+    "red": [
+        (np.array([0, 120, 70]), np.array([10, 255, 255])),
+        (np.array([170, 120, 70]), np.array([180, 255, 255])),
+    ],
+    "purple": [
+        (np.array([120, 100, 70]), np.array([160, 255, 255])),
+    ],
+    "blue": [
+        (np.array([95, 100, 70]), np.array([130, 255, 255])),
+    ],
+    "green": [
+        (np.array([35, 80, 70]), np.array([90, 255, 255])),
+    ],
+}
+
+
+def build_multi_color_mask(hsv_frame, active_colors):
+    mask = np.zeros(hsv_frame.shape[:2], dtype=np.uint8)
+    for color in active_colors:
+        ranges = HSV_COLOR_RANGES.get(color)
+        if not ranges:
+            continue
+        for lower, upper in ranges:
+            mask = cv2.bitwise_or(mask, cv2.inRange(hsv_frame, lower, upper))
+    return mask
+
+machine_state = "scanning plate"
+
+# --- INITIALIZATION FOR CAMERA TRANSFORMATION ---
+# MAKE SURE THAT YOU HAVE RAN calibrateCamera.py FIRST TO GENERATE THE camera_params.npz FILE
+api = dType.load()
+
+cam_index, cam_backend = libteam21.autoSelectCamera()
+cap = cv2.VideoCapture(cam_index, cam_backend)
+
+H_matrix = np.load("HomographyMatrix.npy")
+data = np.load("./camera_params.npz")
+camera_matrix = data["camera_matrix"]
+dist_coeffs   = data["dist_coeffs"]
+
+# Compute undistort maps once
+ret, frame = cap.read()
+h, w = frame.shape[:2]
+new_K, roi = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (w,h), 1)
+map1, map2 = cv2.initUndistortRectifyMap(camera_matrix, dist_coeffs, None, new_K, (w,h), cv2.CV_16SC2)
+
+def pixel_to_robot(u, v, H):
+    p = np.array([u, v, 1])
+    xy = H @ p
+    xy /= xy[2]
+    return xy[0], xy[1]
+
+
+# ---------------------------------------------------------
+# SAFETY: HUMAN HAND DETECTION AND PAUSE/RESUME
+# This is a software safety layer. You should still use the Dobot emergency stop / physical safety rules.
+# ---------------------------------------------------------
+def detect_hand(frame, display_frame=None):
+    """
+    Detect a possible human hand using a simple skin-color mask in YCrCb space.
+    Returns True if a large skin-colored region is found.
+    """
+    if frame is None:
+        return False
+
+    # Optionally only check a region near the robot workspace
+    if HAND_ROI is not None:
+        x, y, w, h = HAND_ROI
+        check_frame = frame[y:y+h, x:x+w]
+        offset_x, offset_y = x, y
+    else:
+        check_frame = frame
+        offset_x, offset_y = 0, 0
+
+    ycrcb = cv2.cvtColor(check_frame, cv2.COLOR_BGR2YCrCb)
+
+    # Common skin-color range in YCrCb. You may need to tune this for your lighting/camera.
+    lower_skin = np.array([0, 133, 77], dtype=np.uint8)
+    upper_skin = np.array([255, 173, 127], dtype=np.uint8)
+    mask = cv2.inRange(ycrcb, lower_skin, upper_skin)
+
+    # Clean the mask
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    hand_found = False
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area >= HAND_MIN_AREA:
+            hand_found = True
+            if display_frame is not None:
+                x, y, w, h = cv2.boundingRect(cnt)
+                cv2.rectangle(
+                    display_frame,
+                    (x + offset_x, y + offset_y),
+                    (x + offset_x + w, y + offset_y + h),
+                    (0, 0, 255),
+                    3
+                )
+                cv2.putText(display_frame, "HAND DETECTED - PAUSED", (20, 80),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            break
+
+    return hand_found
+
+
+def stop_robot_now(api):
+    """Immediately stop queued Dobot motion commands as much as the Dobot API allows."""
+    print("[SAFETY] Hand detected. Stopping robot immediately.")
+    try:
+        dType.SetQueuedCmdForceStopExec(api)
+    except Exception as e:
+        print(f"[WARNING] Could not force-stop queued commands: {e}")
+
+    # Stop pump/gripper suction if your setup uses it.
+    # Be careful: if the robot is holding an object, this may release/drop it.
+    try:
+        dobotArm.stop_pump(api)
+    except Exception:
+        pass
+
+
+def wait_until_hand_clear(api):
+    """Pause here until the hand is gone for HAND_CLEAR_FRAMES consecutive frames."""
+    clear_counter = 0
+
+    while clear_counter < HAND_CLEAR_FRAMES:
+        ret, frame = cap.read()
+        if not ret:
+            continue
+
+        frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
+        display_frame = frame.copy()
+
+        if detect_hand(frame, display_frame):
+            clear_counter = 0
+            stop_robot_now(api)
+        else:
+            clear_counter += 1
+            progress = int((clear_counter / HAND_CLEAR_FRAMES) * 100)
+            cv2.putText(display_frame, f"HAND CLEAR: {progress}%", (20, 80),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
+        cv2.imshow("Detection", display_frame)
+        cv2.waitKey(1)
+
+    print("[SAFETY] Hand cleared. Resuming previous operation.")
+
+
+def safety_check(api, frame=None, display_frame=None):
+    """
+    Check for a hand. If detected, stop the robot and block until safe.
+    Returns True after it is safe to continue.
+    """
+    if frame is not None and detect_hand(frame, display_frame):
+        stop_robot_now(api)
+        wait_until_hand_clear(api)
+    return True
+
+
+# State machine logic to control the flow of the program through the three phases: scanning for plates, scanning for targets, and executing pick/place operations.
+# THIS STATE MACHINE IS TOO SIMPLE. Can you think of logics that should change the robot's sequnece of actions?
+# Ex: what if the robot fails to pick up a target? should it retry? should it go back to scanning for targets in case the target was moved? what if a new plate is added during the pick/place phase?
+# What if a human's hand is in sight during pick/place phase? (safety first!)
+
+def next_state():
+    global machine_state
+    if machine_state == "scanning plate":
+        machine_state = "scanning target"
+    elif machine_state == "scanning target":
+        machine_state = "pick place"
+    elif machine_state == "pick place":
+        machine_state = "scanning plate"
+    else:
+        machine_state = "scanning plate"
+
+
+
+# ---------------------------------------------------------
+# PHASE 1: DETECT Part Drop Zones (Plates)
+# this script assumes a metallic circular plate as the drop zone, but you can modify the detection logic to fit your specific use case.
+# ---------------------------------------------------------
+def phase_detect_plates():
+    print("\n[PHASE 1] Scanning for drop zones. Waiting for stability...")
+    print(f"[DEBUG] Using parameters - BilateralFilter({BILATERAL_DIAMETER}, {BILATERAL_SIGMA_COLOR}, {BILATERAL_SIGMA_SPACE}), HoughCircles(param1={HOUGH_PARAM1}, param2={HOUGH_PARAM2})")
+    stability_counter = 0
+    last_count = 0
+    
+    while True:
+        ret, frame = cap.read()
+        frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
+        display_frame = frame.copy()
+
+        safety_check(api, frame, display_frame)
+        
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        # blurred = cv2.medianBlur(gray, 7)
+        blurred = cv2.bilateralFilter(gray, BILATERAL_DIAMETER, BILATERAL_SIGMA_COLOR, BILATERAL_SIGMA_SPACE)
+        # set region of interest
+        x, y, w, h = [200, 100, 300, 200]  # adjust these values
+
+        roi = blurred[y:y+h, x:x+w]
+        
+        cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+        circles = cv2.HoughCircles(roi, cv2.HOUGH_GRADIENT, 1, 150, param1=HOUGH_PARAM1, param2=HOUGH_PARAM2, minRadius=25, maxRadius=55)
+
+        current_list = []
+        if circles is not None:
+            circles = np.uint16(np.around(circles))
+            for i in circles[0, :]:
+               # Convert from ROI-space to full-image space
+                full_x = i[0] + x      # Add ROI x offset (200)
+                full_y = i[1] + y      # Add ROI y offset (150)
+                
+                cv2.circle(display_frame, (full_x, full_y), i[2], (0, 255, 0), 2)
+                rx, ry = pixel_to_robot(full_x, full_y, H_matrix)
+                current_list.append((rx, ry))
+
+        # --- AUTO-LOCK LOGIC ---
+        if len(current_list) > 0 and len(current_list) == last_count:
+            stability_counter += 1
+        else:
+            stability_counter = 0
+            last_count = len(current_list)
+
+        progress = int((stability_counter / STABILITY_LIMIT) * 100)
+        cv2.putText(display_frame, f"LOCKING PLATES: {progress}%", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        cv2.imshow("Detection", display_frame)
+        cv2.waitKey(1)
+
+        if stability_counter >= STABILITY_LIMIT:
+            print(f"Locked {len(current_list)} plates.")
+            return current_list
+  
+ 
+
+# ---------------------------------------------------------
+# PHASE 2: DETECT Red velcros to pick up (Red Blocks)
+# this script assumes the targets to be picked up are red blocks
+# be aware your target maynot be red, and they may not be rectangular! You will need to modify the detection logic to fit your specific use case.
+# ---------------------------------------------------------
+def phase_detect_targets():
+    print("\n[PHASE 2] Scanning for targets. Waiting for stability...")
+    print(f"[DEBUG] ACTIVE_COLORS={ACTIVE_COLORS}, TARGET_MIN_AREA={TARGET_MIN_AREA}")
+    stability_counter = 0
+    last_count = 0
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret: continue
+        
+        frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
+        # Create a display copy so drawings don't affect next frame's HSV detection
+        display_frame = frame.copy()
+
+        safety_check(api, frame, display_frame)
+        
+        # Target color mask logic (supports multiple colors)
+        hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (3,3), 0), cv2.COLOR_BGR2HSV)
+        mask = build_multi_color_mask(hsv, ACTIVE_COLORS)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        current_list = []
+        for cnt in contours:
+            if cv2.contourArea(cnt) > TARGET_MIN_AREA:
+                M = cv2.moments(cnt)
+                if M["m00"] != 0:
+                    cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
+                    rx, ry = pixel_to_robot(cx, cy, H_matrix)
+                    current_list.append((rx, ry))
+                    # Draw on display_frame only
+                    cv2.drawContours(display_frame, [cnt], -1, (0, 255, 0), 2)
+                    
+        cv2.waitKey(1)
+
+        # --- STABILITY LOGIC ---
+        if len(current_list) != 0:
+            if len(current_list) > 0 and len(current_list) == last_count:
+                stability_counter += 1
+            else:
+                stability_counter = 0
+                last_count = len(current_list)
+
+        # Visual Feedback
+        progress = int((stability_counter / STABILITY_LIMIT) * 100)
+        color = (0, 255, 0) if progress < 100 else (255, 255, 0)
+        
+        cv2.putText(display_frame, f"LOCKING TARGETS: {progress}%", (20, 40), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        cv2.imshow("Detection", display_frame)
+        
+        # --- EXIT CONDITION ---
+        if stability_counter >= STABILITY_LIMIT:
+            print(f"[SUCCESS] Locked {len(current_list)} targets.")
+            #cv2.waitKey(500) # Brief pause so you can see the 100%
+    
+            return current_list
+
+
+
+
+def safety_check_from_camera(api):
+    """Read one camera frame and run the safety check."""
+    ret, frame = cap.read()
+    if not ret:
+        return True
+    frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
+    display_frame = frame.copy()
+    safety_check(api, frame, display_frame)
+    cv2.imshow("Detection", display_frame)
+    cv2.waitKey(1)
+    return True
+
+
+def safe_move_to_xyz(api, x, y, z, rHead=None):
+    """Check for hand before and after each robot movement command."""
+    safety_check_from_camera(api)
+    if rHead is None:
+        dobotArm.move_to_xyz(api, x, y, z)
+    else:
+        dobotArm.move_to_xyz(api, x, y, z, rHead)
+    safety_check_from_camera(api)
+
+# ---------------------------------------------------------
+# PHASE 3: PICK/PLACE LOOP
+# This function assumes 1 drop zone only has 1 part, and executes the pick/place operations in batches.
+# if you are picking up rigid car parts, would you still be able to move directly to the object and to the drop zone? 
+# Do you need collision avoidance? Think about if the robot gripper accidentally hits the plate or other parts on the way to the target, what would happen? How would you modify the robot's movement logic to avoid collisions?
+# ---------------------------------------------------------
+def phase_execute_batch(api, pick_list, drop_list):
+    cv2.VideoCapture(0)
+    time.sleep(0.5)
+    
+    if len(pick_list) == 0 or len(drop_list) == 0:
+        print("missing targets, aborting")
+        return False
+    
+    # Match 1 part to 1 drop zone (uses the smaller count)
+    batch_size = min(len(pick_list), len(drop_list))
+    print(f"\n[PHASE 3] Executing batch of {batch_size} operations.")
+
+    for i in range(batch_size):
+        pick_x, pick_y = pick_list[i]
+        drop_x, drop_y = drop_list[i]
+
+        print(f"Task {i+1}: Moving {pick_x, pick_y} to {drop_x, drop_y}")
+
+        # --- PICK SEQUENCE ---
+        safe_move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+        safe_move_to_xyz(api, pick_x, pick_y, Z_PICK)
+        # optional alternate function call method to include a rotation of the gripper angle
+        # safe_move_to_xyz(api, pick_x, pick_y, Z_SAFE, 45)
+
+        safety_check_from_camera(api)
+        dobotArm.close_gripper(api)
+        safe_move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+
+        # --- PLACE SEQUENCE ---
+        safe_move_to_xyz(api, drop_x, drop_y, Z_SAFE)
+        safety_check_from_camera(api)
+        dobotArm.open_gripper(api)
+        dobotArm.stop_pump(api)
+        safe_move_to_xyz(api, drop_x, drop_y, Z_SAFE)
+
+    # irl, it is ok for 1 dish to contain multiple parts
+    # if len(pick_list) > len(drop_list):
+    #     for i in range(len(pick_list)):
+    #         pick_x, pick_y = pick_list[i]
+    #         drop_x, drop_y = drop_list[0]
+    #         # --- PICK SEQUENCE ---
+    #         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+    #         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK)
+    #         dobotArm.close_gripper(api)
+    #         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+
+    #     # --- PLACE SEQUENCE ---
+    #         dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
+    #         dobotArm.open_gripper(api)
+    #         dobotArm.stop_pump(api)
+    #         dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
+
+    print("\nBatch Complete.")
+    return True
+ 
+
+# ---------------------------------------------------------
+# MAIN EXECUTION
+# contains an oversimplified state machine that runs the three phases sequentially. You can modify the logic to fit your specific use case.
+# ---------------------------------------------------------
+dobotArm.initialize_robot(api)
+dobotArm.open_gripper(api)
+dobotArm.stop_pump(api)
+
+while machine_state == "scanning plate":
+    drop_zone = phase_detect_plates()
+    if drop_zone is not None:
+        next_state()
+
+
+while machine_state == "scanning target":
+    pick_target = phase_detect_targets()
+    if pick_target is not None:
+        next_state()
+
+
+while machine_state == "pick place":
+    completed = phase_execute_batch(api, pick_target, drop_zone)
+    if completed:
+        next_state()
+    else: break
+
+
+cap.release()
+cv2.destroyAllWindows()
