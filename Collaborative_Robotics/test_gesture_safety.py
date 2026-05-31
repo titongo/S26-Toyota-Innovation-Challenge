@@ -83,8 +83,8 @@ def detect_gesture(hand_landmarks):
 def safe_move_to_xyz(api, x, y, z):
     print(f"Moving to: ({x}, {y}, {z}) with real-time gesture tracking...")
     
-    # Start the immediate movement command
-    execCmd = dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJXYZMode, x, y, z, 0, isQueued=0)[0]
+    # Start the immediate movement command (enqueued with isQueued=1 for reliable tracking!)
+    execCmd = dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJXYZMode, x, y, z, 0, isQueued=1)[0]
     
     # Continuous camera read and hand tracking loop while the robot is moving
     while execCmd > dType.GetQueuedCmdCurrentIndex(api)[0]:
@@ -166,7 +166,7 @@ def safe_move_to_xyz(api, x, y, z):
                     # Resume the queue execution and restart the move command
                     print("Resuming movement...")
                     dType.SetQueuedCmdStartExec(api)
-                    execCmd = dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJXYZMode, x, y, z, 0, isQueued=0)[0]
+                    execCmd = dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJXYZMode, x, y, z, 0, isQueued=1)[0]
 
         cv2.putText(display_frame, "ROBOT MOVING...", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
         cv2.imshow("Gesture Safety Window", display_frame)
