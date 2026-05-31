@@ -23,6 +23,7 @@ import numpy as np
 import cv2
 import time
 import os
+import sys
 
 import libteam21
 import mediapipe as mp
@@ -75,8 +76,26 @@ if not ret or frame is None:
         cap = cv2.VideoCapture(0)
         ret, frame = cap.read()
 
-H_matrix = np.load("HomographyMatrix.npy")
-data = np.load("./camera_params.npz")
+# Camera transformation parameters safely loaded from either ./ or ../
+H_matrix = None
+data = None
+
+if os.path.exists("HomographyMatrix.npy"):
+    H_matrix = np.load("HomographyMatrix.npy")
+elif os.path.exists("../HomographyMatrix.npy"):
+    H_matrix = np.load("../HomographyMatrix.npy")
+else:
+    print("Error: HomographyMatrix.npy not found!")
+    sys.exit(1)
+
+if os.path.exists("camera_params.npz"):
+    data = np.load("camera_params.npz")
+elif os.path.exists("../camera_params.npz"):
+    data = np.load("../camera_params.npz")
+else:
+    print("Error: camera_params.npz not found!")
+    sys.exit(1)
+
 camera_matrix = data["camera_matrix"]
 dist_coeffs   = data["dist_coeffs"]
 
