@@ -26,23 +26,6 @@ import os
 import sys
 
 import libteam21
-import mediapipe as mp
-
-try:
-    import mediapipe.solutions.hands as mp_hands
-    import mediapipe.solutions.drawing_utils as mp_drawing
-except ImportError:
-    import mediapipe.python.solutions.hands as mp_hands
-    import mediapipe.python.solutions.drawing_utils as mp_drawing
-
-# Initialize a single global MediaPipe Hands tracker to prevent re-initialization lag
-hands = mp_hands.Hands(
-    static_image_mode=False,
-    max_num_hands=2,
-    min_detection_confidence=0.6,
-    min_tracking_confidence=0.6
-)
-
 
 """CONSTANTS"""
 
@@ -118,85 +101,8 @@ def fold_angle(a):
     return a
 
 
-def detect_gesture(hand_landmarks):
-    lm = hand_landmarks.landmark
-
-    fingers_up = 0
-
-    finger_tips = [8, 12, 16, 20]
-    finger_pips = [6, 10, 14, 18]
-
-    for tip, pip in zip(finger_tips, finger_pips):
-        if lm[tip].y < lm[pip].y:
-            fingers_up += 1
-
-    thumb_index_dist = ((lm[4].x - lm[8].x) ** 2 + (lm[4].y - lm[8].y) ** 2) ** 0.5
-
-    if fingers_up >= 4:
-        return "open_palm"
-    elif fingers_up == 0:
-        return "fist"
-    elif thumb_index_dist > 0.12:
-        return "pinch_open"
-    elif thumb_index_dist < 0.06:
-        return "pinch_close"
-    else:
-        return "other"
-
-
 def safe_move_to_xyz(api, x, y, z, rHead=0):
-    # Check-Before-Transit Safety: Ensures the workspace is 100% clear before executing any movement, preventing complex loop freezes
-    while True:
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            continue
-
-        frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
-        display_frame = frame.copy()
-
-        # Re-use the fast global hands tracker
-        result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-
-        if result.multi_hand_landmarks:
-            print("[SAFETY] Hand detected in workspace! Robot paused immediately.")
-            
-            # Immediately move to safe vertical height (using standard non-ML command)
-            dobotArm.move_to_xyz(api, x, y, Z_SAFE, rHead)
-
-            # Block in pause loop until hand is completely removed from the frame
-            while True:
-                ret2, frame2 = cap.read()
-                if not ret2 or frame2 is None:
-                    continue
-
-                frame2 = cv2.remap(frame2, map1, map2, cv2.INTER_LINEAR)
-                display_frame_paused = frame2.copy()
-                
-                result2 = hands.process(cv2.cvtColor(frame2, cv2.COLOR_BGR2RGB))
-
-                # If no hand is detected in frame anymore, resume immediately!
-                if not result2.multi_hand_landmarks:
-                    print("[SAFETY] Hand removed. Resuming movement.")
-                    break
-
-                # Draw skeleton connections
-                mp_drawing.draw_landmarks(
-                    display_frame_paused, result2.multi_hand_landmarks[0], mp_hands.HAND_CONNECTIONS
-                )
-                cv2.putText(display_frame_paused, "PAUSED - HAND IN WORKSPACE", 
-                            (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                cv2.imshow("Detection", display_frame_paused)
-                cv2.waitKey(1)
-
-            continue
-
-        # Draw smooth normal moving feedback on the screen
-        cv2.putText(display_frame, "ROBOT MOVING...", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        cv2.imshow("Detection", display_frame)
-        cv2.waitKey(1)
-        break
-
-    # Execute the solid, highly robust move command
+    # Hand detection completely removed to prevent USB bus latency issues, thread locks, and webcam-sharing freezes
     dobotArm.move_to_xyz(api, x, y, z, rHead)
 
 
