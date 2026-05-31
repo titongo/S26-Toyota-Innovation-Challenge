@@ -66,6 +66,11 @@ h, w = frame.shape[:2]
 new_K, roi = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (w,h), 1)
 map1, map2 = cv2.initUndistortRectifyMap(camera_matrix, dist_coeffs, None, new_K, (w,h), cv2.CV_16SC2)
 
+
+# Init the focus area values
+x_focus, y_focus, w_focus, h_focus = [200, 210, 300, 200]
+
+
 def pixel_to_robot(u, v, H):
     p = np.array([u, v, 1])
     xy = H @ p
@@ -143,19 +148,12 @@ def phase_detect_plates():
         blurred = cv2.bilateralFilter(gaussian, bilateral_diameter, bilateral_sigma_color, bilateral_sigma_space)
         cv2.imshow("Blurred (Debug)", blurred)
         # set region of interest
-        x, y, w, h = [200, 100, 300, 200]  # adjust these values
+          # adjust these values
 
-        roi = blurred[y:y+h, x:x+w]
+        focus_area = blurred[y_focus:y_focus+h_focus, x_focus:x_focus+w_focus]
         
-        cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-        
-        # Run EDCircles on the ROI
-        ed.detectEdges(roi)
-        ellipses = ed.detectEllipses()
-        
-        # Show debug edge map to see live edge segment extraction
-        edge_img = ed.getEdgeImage()
-        cv2.imshow("ED Edge Map (Debug)", edge_img)
+        cv2.rectangle(display_frame, (x_focus, y_focus), (x_focus+w_focus, y_focus+h_focus), (0, 255, 0), 2)
+        circles = cv2.HoughCircles(focus_area, cv2.HOUGH_GRADIENT, 1, 150, param1=HOUGH_PARAM1, param2=HOUGH_PARAM2, minRadius=25, maxRadius=55)
 
         current_list = []
         if ellipses is not None:
@@ -244,8 +242,10 @@ def phase_detect_targets(targetPart: Part):
         frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
         # Create a display copy so drawings don't affect next frame's HSV detection
         display_frame = frame.copy()
-        targetPart.updateFrame(frame)
         
+        focus_area = display_frame[y_focus:y_focus+h_focus, x_focus:x_focus+w_focus]
+        targetPart.updateFrame(focus_area)
+        cv2.rectangle(display_frame, (x_focus, y_focus), (x_focus+w_focus, y_focus+h_focus), (0, 255, 0), 2)
         # Red Tag Logic
         mask = targetPart.returnMask()
         gitmask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
@@ -274,17 +274,18 @@ def phase_detect_targets(targetPart: Part):
                     # point one step along the short axis through the homography, then take
                     # the angle between them in mm. This auto-corrects for camera rotation.
                     STEP = 20  # pixels
-                    rx0, ry0 = pixel_to_robot(cx, cy, H_matrix)
-                    rx1, ry1 = pixel_to_robot(cx + short_vec[0]*STEP,
-                                            cy + short_vec[1]*STEP, H_matrix) # creates a delta-r
+                    rx0, ry0 = pixel_to_robot(cx + x_focus, cy + y_focus, H_matrix)
+                    rx1, ry1 = pixel_to_robot(cx + x_focus + short_vec[0]*STEP,
+                                            cy + y_focus + short_vec[1]*STEP, H_matrix) # creates a delta-r
                     grip_angle = fold_angle(np.degrees(np.arctan2(ry1 - ry0, rx1 - rx0))
                                             + GRIPPER_ANGLE_OFFSET) #This find the angle using trig
 
                     current_list.append((rx0, ry0, grip_angle))   # <-- now a 3-tuple
 
                     # visual feedback
-                    cv2.drawContours(display_frame, [box.astype(np.int32)], -1, (0, 255, 0), 2)
-                    cv2.putText(display_frame, f"{grip_angle:.0f}", (cx, cy),
+                    box_full = (box + np.array([x_focus, y_focus])).astype(np.int32)
+                    cv2.drawContours(display_frame, [box_full], -1, (0, 255, 0), 2)
+                    cv2.putText(display_frame, f"{grip_angle:.0f}", (cx + x_focus, cy + y_focus),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
                     
         cv2.waitKey(1)
