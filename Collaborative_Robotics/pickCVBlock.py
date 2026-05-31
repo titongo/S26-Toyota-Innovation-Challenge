@@ -19,6 +19,11 @@
 # This code is a simplified implementation of a collaborative robotics system that detects plates and targets using computer vision, 
 # and then commands a Dobot robotic arm to pick and place objects accordingly.
 
+#This code is a simplified implementation of a collaborative robotics system that detects plates and targets using computer vision, 
+#and then commands a Dobot robotic arm to pick and place objects accordingly. The system operates in three phases: scanning for plates, 
+#scanning for targets, and executing the pick/place operations. 
+#Stability checks are implemented to ensure reliable detection before proceeding to the next phase.
+
 import dobotArm
 import lib.DobotDllType as dType
 import numpy as np
@@ -68,6 +73,44 @@ def pixel_to_robot(u, v, H):
     return xy[0], xy[1]
 
 
+####################################################################################################
+####################################################################################################
+############################### MODIFIED PART START: HAND GESTURE ##################################
+####################################################################################################
+####################################################################################################
+
+def detect_gesture(hand_landmarks):
+    lm = hand_landmarks.landmark
+
+    fingers_up = 0
+
+    finger_tips = [8, 12, 16, 20]
+    finger_pips = [6, 10, 14, 18]
+
+    for tip, pip in zip(finger_tips, finger_pips):
+        if lm[tip].y < lm[pip].y:
+            fingers_up += 1
+
+    thumb_index_dist = ((lm[4].x - lm[8].x) ** 2 + (lm[4].y - lm[8].y) ** 2) ** 0.5
+
+    if fingers_up >= 4:
+        return "open_palm"
+    elif fingers_up == 0:
+        return "fist"
+    elif thumb_index_dist > 0.12:
+        return "pinch_open"
+    elif thumb_index_dist < 0.06:
+        return "pinch_close"
+    else:
+        return "other"
+
+####################################################################################################
+####################################################################################################
+################################ MODIFIED PART END: HAND GESTURE ###################################
+####################################################################################################
+####################################################################################################
+
+
 def safe_move_to_xyz(api, x, y, z):
     while True:
         ret, frame = cap.read()
@@ -85,25 +128,60 @@ def safe_move_to_xyz(api, x, y, z):
 
             result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
+            ####################################################################################################
+            ####################################################################################################
+            ########################### MODIFIED PART START: GESTURE CONTROL LOGIC #############################
+            ####################################################################################################
+            ####################################################################################################
+
             if result.multi_hand_landmarks:
-                print("[SAFETY] Hand detected. Robot paused.")
+                gesture = detect_gesture(result.multi_hand_landmarks[0])
 
-                dobotArm.move_to_xyz(api, x, y, Z_SAFE)
+                if gesture == "pinch_open":
+                    print("[GESTURE] Thumb-index open detected. Opening gripper.")
+                    dobotArm.open_gripper(api)
+                    continue
 
-                while True:
-                    ret, frame = cap.read()
-                    if not ret:
-                        continue
+                elif gesture == "pinch_close":
+                    print("[GESTURE] Thumb-index close detected. Closing gripper.")
+                    dobotArm.close_gripper(api)
+                    continue
 
-                    frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
-                    result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                elif gesture == "open_palm":
+                    print("[SAFETY] Open palm detected. Robot paused.")
 
-                    if not result.multi_hand_landmarks:
-                        print("[SAFETY] Hand removed. Resuming.")
-                        break
-                
-                # 没用就删掉 ####
-                continue
+                    dobotArm.move_to_xyz(api, x, y, Z_SAFE)
+
+                    while True:
+                        ret, frame = cap.read()
+                        if not ret:
+                            continue
+
+                        frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
+                        result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+
+                        if result.multi_hand_landmarks:
+                            gesture = detect_gesture(result.multi_hand_landmarks[0])
+
+                            if gesture == "pinch_open":
+                                print("[GESTURE] Thumb-index open detected. Opening gripper.")
+                                dobotArm.open_gripper(api)
+
+                            elif gesture == "pinch_close":
+                                print("[GESTURE] Thumb-index close detected. Closing gripper.")
+                                dobotArm.close_gripper(api)
+
+                            elif gesture == "fist":
+                                print("[SAFETY] Fist detected. Resuming.")
+                                break
+
+                    continue
+
+            ####################################################################################################
+            ####################################################################################################
+            ############################ MODIFIED PART END: GESTURE CONTROL LOGIC ##############################
+            ####################################################################################################
+            ####################################################################################################
 
         break
 
