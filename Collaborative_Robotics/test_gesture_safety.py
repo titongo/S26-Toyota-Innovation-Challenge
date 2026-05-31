@@ -16,6 +16,14 @@ except ImportError:
     import mediapipe.python.solutions.hands as mp_hands
     import mediapipe.python.solutions.drawing_utils as mp_drawing
 
+# Initialize a single global MediaPipe Hands tracker to prevent massive CPU re-initialization lag
+hands = mp_hands.Hands(
+    static_image_mode=False,
+    max_num_hands=2,
+    min_detection_confidence=0.6,
+    min_tracking_confidence=0.6
+)
+
 print("=== STARTING STANDALONE GESTURE SAFETY TEST ===")
 
 # --- CONSTANTS ---
@@ -27,7 +35,7 @@ print("1. Loading Dobot API...")
 api = dType.load()
 
 print("2. Opening Camera...")
-cam_index, cam_backend = libteam21.autoSelectCamera()
+cam_index, cam_backend = libteam21.auto_select_camera("usb")
 cap = cv2.VideoCapture(cam_index, cam_backend)
 
 ret, frame = cap.read()
@@ -46,8 +54,23 @@ if frame is None:
     print("Error: Could not open any camera device!")
     sys.exit(1)
 
-# Camera parameters
-data = np.load("./camera_params.npz")
+# Camera transformation parameters safely loaded from either ./ or ../
+if os.path.exists("HomographyMatrix.npy"):
+    H_matrix = np.load("HomographyMatrix.npy")
+elif os.path.exists("../HomographyMatrix.npy"):
+    H_matrix = np.load("../HomographyMatrix.npy")
+else:
+    print("Error: HomographyMatrix.npy not found!")
+    sys.exit(1)
+
+if os.path.exists("camera_params.npz"):
+    data = np.load("camera_params.npz")
+elif os.path.exists("../camera_params.npz"):
+    data = np.load("../camera_params.npz")
+else:
+    print("Error: camera_params.npz not found!")
+    sys.exit(1)
+
 camera_matrix = data["camera_matrix"]
 dist_coeffs   = data["dist_coeffs"]
 
@@ -102,78 +125,72 @@ def safe_move_to_xyz(api, x, y, z):
         frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
         display_frame = frame.copy()
 
-        with mp_hands.Hands(
-            static_image_mode=False,
-            max_num_hands=2,
-            min_detection_confidence=0.6,
-            min_tracking_confidence=0.6
-        ) as hands:
+        # Re-use the pre-initialized global hands object for blazing speed!
+        result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
-            result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        if result.multi_hand_landmarks:
+            # Draw the full hand skeletal skeleton live on the GUI!
+            mp_drawing.draw_landmarks(
+                display_frame, result.multi_hand_landmarks[0], mp_hands.HAND_CONNECTIONS
+            )
+            
+            gesture = detect_gesture(result.multi_hand_landmarks[0])
 
-            if result.multi_hand_landmarks:
-                # Draw the full hand skeletal skeleton live on the GUI!
-                mp_drawing.draw_landmarks(
-                    display_frame, result.multi_hand_landmarks[0], mp_hands.HAND_CONNECTIONS
-                )
+            if gesture == "pinch_open":
+                print("[GESTURE] Thumb-index open detected. Opening gripper.")
+                dobotArm.open_gripper(api)
+            elif gesture == "pinch_close":
+                print("[GESTURE] Thumb-index close detected. Closing gripper.")
+                dobotArm.close_gripper(api)
+            elif gesture == "open_palm":
+                print("[SAFETY] Open palm detected. Pausing robot immediately!")
                 
-                gesture = detect_gesture(result.multi_hand_landmarks[0])
+                # Force stop execution of the current movement command
+                dType.SetQueuedCmdForceStopExec(api)
+                
+                # Raise the arm to safe height
+                dobotArm.move_to_xyz(api, x, y, Z_SAFE)
 
-                if gesture == "pinch_open":
-                    print("[GESTURE] Thumb-index open detected. Opening gripper.")
-                    dobotArm.open_gripper(api)
-                elif gesture == "pinch_close":
-                    print("[GESTURE] Thumb-index close detected. Closing gripper.")
-                    dobotArm.close_gripper(api)
-                elif gesture == "open_palm":
-                    print("[SAFETY] Open palm detected. Pausing robot immediately!")
+                # Block in this pause loop until "fist" is shown to resume
+                while True:
+                    ret2, frame2 = cap.read()
+                    if not ret2:
+                        continue
+
+                    frame2 = cv2.remap(frame2, map1, map2, cv2.INTER_LINEAR)
+                    display_frame_paused = frame2.copy()
                     
-                    # Force stop execution of the current movement command
-                    dType.SetQueuedCmdForceStopExec(api)
-                    
-                    # Raise the arm to safe height
-                    dobotArm.move_to_xyz(api, x, y, Z_SAFE)
+                    result2 = hands.process(cv2.cvtColor(frame2, cv2.COLOR_BGR2RGB))
 
-                    # Block in this pause loop until "fist" is shown to resume
-                    while True:
-                        ret2, frame2 = cap.read()
-                        if not ret2:
-                            continue
+                    if result2.multi_hand_landmarks:
+                        mp_drawing.draw_landmarks(
+                            display_frame_paused, result2.multi_hand_landmarks[0], mp_hands.HAND_CONNECTIONS
+                        )
+                        gesture2 = detect_gesture(result2.multi_hand_landmarks[0])
 
-                        frame2 = cv2.remap(frame2, map1, map2, cv2.INTER_LINEAR)
-                        display_frame_paused = frame2.copy()
+                        if gesture2 == "pinch_open":
+                            print("[GESTURE] Thumb-index open detected. Opening gripper.")
+                            dobotArm.open_gripper(api)
+                        elif gesture2 == "pinch_close":
+                            print("[GESTURE] Thumb-index close detected. Closing gripper.")
+                            dobotArm.close_gripper(api)
+                        elif gesture2 == "fist":
+                            print("[SAFETY] Fist detected. Resuming movement.")
+                            break
                         
-                        result2 = hands.process(cv2.cvtColor(frame2, cv2.COLOR_BGR2RGB))
+                        cv2.putText(display_frame_paused, f"PAUSED - SHOW FIST TO RESUME (Current: {gesture2})", 
+                                    (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                    else:
+                        cv2.putText(display_frame_paused, "PAUSED - SHOW FIST TO RESUME (No Hand)", 
+                                    (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                        
+                    cv2.imshow("Gesture Safety Window", display_frame_paused)
+                    cv2.waitKey(1)
 
-                        if result2.multi_hand_landmarks:
-                            mp_drawing.draw_landmarks(
-                                display_frame_paused, result2.multi_hand_landmarks[0], mp_hands.HAND_CONNECTIONS
-                            )
-                            gesture2 = detect_gesture(result2.multi_hand_landmarks[0])
-
-                            if gesture2 == "pinch_open":
-                                print("[GESTURE] Thumb-index open detected. Opening gripper.")
-                                dobotArm.open_gripper(api)
-                            elif gesture2 == "pinch_close":
-                                print("[GESTURE] Thumb-index close detected. Closing gripper.")
-                                dobotArm.close_gripper(api)
-                            elif gesture2 == "fist":
-                                print("[SAFETY] Fist detected. Resuming movement.")
-                                break
-                            
-                            cv2.putText(display_frame_paused, f"PAUSED - SHOW FIST TO RESUME (Current: {gesture2})", 
-                                        (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                        else:
-                            cv2.putText(display_frame_paused, "PAUSED - SHOW FIST TO RESUME (No Hand)", 
-                                        (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                            
-                        cv2.imshow("Gesture Safety Window", display_frame_paused)
-                        cv2.waitKey(1)
-
-                    # Resume the queue execution and restart the move command
-                    print("Resuming movement...")
-                    dType.SetQueuedCmdStartExec(api)
-                    execCmd = dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJXYZMode, x, y, z, 0, isQueued=1)[0]
+                # Resume the queue execution and restart the move command
+                print("Resuming movement...")
+                dType.SetQueuedCmdStartExec(api)
+                execCmd = dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJXYZMode, x, y, z, 0, isQueued=1)[0]
 
         cv2.putText(display_frame, "ROBOT MOVING...", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
         cv2.imshow("Gesture Safety Window", display_frame)
@@ -205,6 +222,7 @@ try:
 
 except KeyboardInterrupt:
     print("\nTest stopped by user.")
+    hands.close()
     cap.release()
     cv2.destroyAllWindows()
     sys.exit(0)
