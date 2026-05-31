@@ -84,7 +84,8 @@ def initialize_robot(api):
 """
 def move_to_xyz(api,x,y,z,rHead=0):
     cmdIndx = -1
-    execCmd = dType.SetPTPCmd(api,dType.PTPMode.PTPMOVJXYZMode,x,y,z,rHead,isQueued=0)[0]
+    # Enqueue command cleanly using isQueued=1 to ensure reliable queue tracking and prevent deadlocks
+    execCmd = dType.SetPTPCmd(api,dType.PTPMode.PTPMOVJXYZMode,x,y,z,rHead,isQueued=1)[0]
     #Allow the command to complete. The robot will stop moving when it's done
     while execCmd > dType.GetQueuedCmdCurrentIndex(api)[0]:
         dType.dSleep(25)
@@ -96,7 +97,8 @@ def move_to_xyz(api,x,y,z,rHead=0):
 def move_joint_angles(api,J1,J2,J3,J4=0):
     cmdIndx = -1
     
-    execCmd = dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJANGLEMode, J1, J2, J3, J4, isQueued = 0)[0]
+    # Enqueue command cleanly using isQueued=1 to ensure reliable queue tracking and prevent deadlocks
+    execCmd = dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJANGLEMode, J1, J2, J3, J4, isQueued = 1)[0]
     #Allow the command to complete. The robot will stop moving when it's done
     while execCmd > dType.GetQueuedCmdCurrentIndex(api)[0]:
         dType.dSleep(25)
