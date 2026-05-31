@@ -177,9 +177,10 @@ def phase_detect_plates():
                             print(f"      -> REJECTED: Not circular enough (ratio {ratio:.2f} >= 1.2)")
                         continue
                 
-                # Filter circles in the expected radius range (25 to 55 pixels)
-                if 25 <= r <= 55:
+                # Filter circles in the expected radius range (18 to 55 pixels)
+                if 18 <= r <= 55:
                     full_x = cx_roi + x      # Add ROI x offset (200)
+                    
                     full_y = cy_roi + y      # Add ROI y offset (100)
                     
                     cv2.circle(display_frame, (full_x, full_y), r, (0, 255, 0), 2)
@@ -195,10 +196,10 @@ def phase_detect_plates():
                     
                     current_list.append((smooth_rx, smooth_ry))
                     if log_debug:
-                        print(f"      -> ACCEPTED: Radius {r}px in range [25, 55], smoothed robot pos=({smooth_rx:.1f}, {smooth_ry:.1f})")
+                        print(f"      -> ACCEPTED: Radius {r}px in range [18, 55], smoothed robot pos=({smooth_rx:.1f}, {smooth_ry:.1f})")
                 else:
                     if log_debug:
-                        print(f"      -> REJECTED: Radius {r}px is outside expected range [25, 55]")
+                        print(f"      -> REJECTED: Radius {r}px is outside expected range [18, 55]")
         else:
             if log_debug:
                 print("No shapes detected by Edge Drawing algorithm. (Tip: Try adjusting lighting, focus, or lowering GradientThresholdValue)")
