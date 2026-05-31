@@ -53,7 +53,7 @@ machine_state = "scanning plate"
 # MAKE SURE THAT YOU HAVE RAN calibrateCamera.py FIRST TO GENERATE THE camera_params.npz FILE
 api = dType.load()
 
-cam_index, cam_backend = libteam21.auto_select_camera("integrated")
+cam_index, cam_backend = libteam21.auto_select_camera("usb")
 cap = cv2.VideoCapture(cam_index, cam_backend)
 
 H_matrix = np.load("HomographyMatrix.npy")
@@ -63,6 +63,10 @@ dist_coeffs   = data["dist_coeffs"]
 
 # Compute undistort maps once
 ret, frame = cap.read()
+if not ret or frame is None:
+    print("Failed to read from camera. Check connection and index.")
+    exit(1)
+
 h, w = frame.shape[:2]
 new_K, roi = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (w,h), 1)
 map1, map2 = cv2.initUndistortRectifyMap(camera_matrix, dist_coeffs, None, new_K, (w,h), cv2.CV_16SC2)
