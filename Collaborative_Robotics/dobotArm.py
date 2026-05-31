@@ -1,5 +1,6 @@
 import lib.DobotDllType as dType
 import platform
+import time
 
 #Useful global variables
 # --- These are status strings that you might see, so we're defining them here ---
@@ -84,11 +85,27 @@ def initialize_robot(api):
 """
 def move_to_xyz(api,x,y,z,rHead=0):
     cmdIndx = -1
+    print(f"[DEBUG] move_to_xyz started. Target coordinates: x={x}, y={y}, z={z}, rot={rHead}")
+    
     # Enqueue command cleanly using isQueued=1 to ensure reliable queue tracking and prevent deadlocks
     execCmd = dType.SetPTPCmd(api,dType.PTPMode.PTPMOVJXYZMode,x,y,z,rHead,isQueued=1)[0]
-    #Allow the command to complete. The robot will stop moving when it's done
+    print(f"[DEBUG] Move command enqueued with index: {execCmd}")
+    
+    # Allow the command to complete with a failsafe timeout to prevent deadlocks from lost serial packets
+    start_time = time.time()
+    last_print = 0.0
     while execCmd > dType.GetQueuedCmdCurrentIndex(api)[0]:
+        now = time.time()
+        if now - last_print > 0.5:
+            current_idx = dType.GetQueuedCmdCurrentIndex(api)[0]
+            print(f"  -> [DEBUG] Monitoring move: target index={execCmd}, current index={current_idx}")
+            last_print = now
+            
+        if now - start_time > 4.5: # 4.5 second failsafe timeout
+            print("[WARNING] move_to_xyz tracking timed out! Breaking to prevent permanent deadlock.")
+            break
         dType.dSleep(25)
+    print("[DEBUG] move_to_xyz completed.")
 
 """
     Move the robot to the given joint angles using PTP Linear ANGLE mode
@@ -96,12 +113,26 @@ def move_to_xyz(api,x,y,z,rHead=0):
 """
 def move_joint_angles(api,J1,J2,J3,J4=0):
     cmdIndx = -1
+    print(f"[DEBUG] move_joint_angles started. Targets: J1={J1}, J2={J2}, J3={J3}, J4={J4}")
     
     # Enqueue command cleanly using isQueued=1 to ensure reliable queue tracking and prevent deadlocks
     execCmd = dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJANGLEMode, J1, J2, J3, J4, isQueued = 1)[0]
-    #Allow the command to complete. The robot will stop moving when it's done
+    print(f"[DEBUG] Angle command enqueued with index: {execCmd}")
+    
+    start_time = time.time()
+    last_print = 0.0
     while execCmd > dType.GetQueuedCmdCurrentIndex(api)[0]:
+        now = time.time()
+        if now - last_print > 0.5:
+            current_idx = dType.GetQueuedCmdCurrentIndex(api)[0]
+            print(f"  -> [DEBUG] Monitoring angles: target index={execCmd}, current index={current_idx}")
+            last_print = now
+            
+        if now - start_time > 4.5: # 4.5 second failsafe timeout
+            print("[WARNING] move_joint_angles tracking timed out! Breaking to prevent permanent deadlock.")
+            break
         dType.dSleep(25)
+    print("[DEBUG] move_joint_angles completed.")
     
 """
     Move the robot to it's home position. Note: this will use basic PTP motion, rather than
