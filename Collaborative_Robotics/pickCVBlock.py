@@ -45,6 +45,7 @@ BILATERAL_SIGMA_COLOR = int(os.getenv("BILATERAL_SC", 40))
 BILATERAL_SIGMA_SPACE = int(os.getenv("BILATERAL_SS", 40))
 HOUGH_PARAM1 = int(os.getenv("HOUGH_PARAM1", 80))  # Lower for reflective surfaces
 HOUGH_PARAM2 = int(os.getenv("HOUGH_PARAM2", 20))  # Lower for reflective surfaces
+SATURATION_GAIN = float(os.getenv("SATURATION_GAIN", 1.35))
 
 machine_state = "scanning plate"
 
@@ -52,7 +53,7 @@ machine_state = "scanning plate"
 # MAKE SURE THAT YOU HAVE RAN calibrateCamera.py FIRST TO GENERATE THE camera_params.npz FILE
 api = dType.load()
 
-cam_index, cam_backend = libteam21.autoSelectCamera()
+cam_index, cam_backend = libteam21.auto_select_camera("integrated")
 cap = cv2.VideoCapture(cam_index, cam_backend)
 
 H_matrix = np.load("HomographyMatrix.npy")
@@ -78,6 +79,14 @@ def fold_angle(a):
     while a > 90:   a -= 180
     while a <= -90: a += 180
     return a
+
+def boost_saturation(frame, gain=SATURATION_GAIN):
+    if gain <= 1.0:
+        return frame
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(hsv)
+    s = np.clip(s.astype(np.float32) * gain, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(cv2.merge((h, s, v)), cv2.COLOR_HSV2BGR)
 # State machine logic to control the flow of the program through the three phases: scanning for plates, scanning for targets, and executing pick/place operations.
 # THIS STATE MACHINE IS TOO SIMPLE. Can you think of logics that should change the robot's sequnece of actions?
 # Ex: what if the robot fails to pick up a target? should it retry? should it go back to scanning for targets in case the target was moved? what if a new plate is added during the pick/place phase?
@@ -109,6 +118,7 @@ def phase_detect_plates():
     while True:
         ret, frame = cap.read()
         frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
+        frame = libteam21.boost_saturation(frame)
         display_frame = frame.copy()
         
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -165,6 +175,7 @@ def phase_detect_targets(targetPart: Part):
         if not ret: continue
         
         frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
+        frame = libteam21.boost_saturation(frame)
         # Create a display copy so drawings don't affect next frame's HSV detection
         display_frame = frame.copy()
         targetPart.updateFrame(frame)
