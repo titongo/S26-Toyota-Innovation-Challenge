@@ -23,8 +23,25 @@ import numpy as np
 import cv2
 import time
 import os
+import sys
 
 import libteam21
+import mediapipe as mp
+
+try:
+    import mediapipe.solutions.hands as mp_hands
+    import mediapipe.solutions.drawing_utils as mp_drawing
+except ImportError:
+    import mediapipe.python.solutions.hands as mp_hands
+    import mediapipe.python.solutions.drawing_utils as mp_drawing
+
+# Initialize a single global MediaPipe Hands tracker to prevent re-initialization lag
+hands = mp_hands.Hands(
+    static_image_mode=False,
+    max_num_hands=2,
+    min_detection_confidence=0.6,
+    min_tracking_confidence=0.6
+)
 
 
 """CONSTANTS"""
@@ -37,16 +54,6 @@ PIXEL_TOLERANCE = 10  #object can move at most this # of pixels to be considered
 #Angle to calibrate grip
 GRIPPER_ANGLE_OFFSET = -45   # degrees.
 
-
-# --- PHASE 1 TUNING PARAMETERS (set via environment variables) ---
-# For shiny metal disk detection, use lower param1/param2 and aggressive bilateral filtering
-BILATERAL_DIAMETER = int(os.getenv("BILATERAL_D", 9))
-BILATERAL_SIGMA_COLOR = int(os.getenv("BILATERAL_SC", 40))
-BILATERAL_SIGMA_SPACE = int(os.getenv("BILATERAL_SS", 40))
-HOUGH_PARAM1 = int(os.getenv("HOUGH_PARAM1", 80))  # Lower for reflective surfaces
-HOUGH_PARAM2 = int(os.getenv("HOUGH_PARAM2", 20))  # Lower for reflective surfaces
-SATURATION_GAIN = float(os.getenv("SATURATION_GAIN", 1.35))
-
 machine_state = "scanning plate"
 
 # --- INITIALIZATION FOR CAMERA TRANSFORMATION ---
@@ -56,25 +63,46 @@ api = dType.load()
 cam_index, cam_backend = libteam21.auto_select_camera("usb")
 cap = cv2.VideoCapture(cam_index, cam_backend)
 
-H_matrix = np.load("HomographyMatrix.npy")
-data = np.load("./camera_params.npz")
+# If the auto-selected camera fails to read a frame, fall back to standard indices
+ret, frame = cap.read()
+if not ret or frame is None:
+    print(f"[WARNING] Auto-selected camera index {cam_index} failed to read. Falling back to index 2 (standard USB camera)...")
+    cap.release()
+    cap = cv2.VideoCapture(2) # Fall back to standard V4L2 index 2
+    ret, frame = cap.read()
+    if not ret or frame is None:
+        print("[WARNING] Index 2 failed. Falling back to index 0 (default webcam)...")
+        cap.release()
+        cap = cv2.VideoCapture(0)
+        ret, frame = cap.read()
+
+# Camera transformation parameters safely loaded from either ./ or ../
+if os.path.exists("HomographyMatrix.npy"):
+    H_matrix = np.load("HomographyMatrix.npy")
+elif os.path.exists("../HomographyMatrix.npy"):
+    H_matrix = np.load("../HomographyMatrix.npy")
+else:
+    print("Error: HomographyMatrix.npy not found!")
+    sys.exit(1)
+
+if os.path.exists("camera_params.npz"):
+    data = np.load("camera_params.npz")
+elif os.path.exists("../camera_params.npz"):
+    data = np.load("../camera_params.npz")
+else:
+    print("Error: camera_params.npz not found!")
+    sys.exit(1)
+
 camera_matrix = data["camera_matrix"]
 dist_coeffs   = data["dist_coeffs"]
 
 # Compute undistort maps once
-ret, frame = cap.read()
-if not ret or frame is None:
-    print("Failed to read from camera. Check connection and index.")
-    exit(1)
-
-h, w = frame.shape[:2]
+h, w = frame.shape[:2] if frame is not None else (480, 640)
 new_K, roi = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (w,h), 1)
 map1, map2 = cv2.initUndistortRectifyMap(camera_matrix, dist_coeffs, None, new_K, (w,h), cv2.CV_16SC2)
 
-
 # Init the focus area values
-x_focus, y_focus, w_focus, h_focus = [200, 210, 300, 200]
-
+x_focus, y_focus, w_focus, h_focus = [200, 100, 300, 200]  # Standard focus region
 
 def pixel_to_robot(u, v, H):
     p = np.array([u, v, 1])
@@ -89,13 +117,116 @@ def fold_angle(a):
     while a <= -90: a += 180
     return a
 
-def boost_saturation(frame, gain=SATURATION_GAIN):
-    if gain <= 1.0:
-        return frame
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    h, s, v = cv2.split(hsv)
-    s = np.clip(s.astype(np.float32) * gain, 0, 255).astype(np.uint8)
-    return cv2.cvtColor(cv2.merge((h, s, v)), cv2.COLOR_HSV2BGR)
+
+def detect_gesture(hand_landmarks):
+    lm = hand_landmarks.landmark
+
+    fingers_up = 0
+
+    finger_tips = [8, 12, 16, 20]
+    finger_pips = [6, 10, 14, 18]
+
+    for tip, pip in zip(finger_tips, finger_pips):
+        if lm[tip].y < lm[pip].y:
+            fingers_up += 1
+
+    thumb_index_dist = ((lm[4].x - lm[8].x) ** 2 + (lm[4].y - lm[8].y) ** 2) ** 0.5
+    
+    # Check if thumb tip is pointing upwards and higher than index knuckle/thumb MCP
+    thumb_is_up = lm[4].y < lm[3].y and lm[4].y < lm[5].y
+
+    if fingers_up == 0 and thumb_is_up:
+        return "thumbs_up"
+    elif fingers_up == 0 and not thumb_is_up:
+        return "fist"
+    elif fingers_up >= 4:
+        return "open_palm"
+    elif thumb_index_dist > 0.12:
+        return "pinch_open"
+    elif thumb_index_dist < 0.06:
+        return "pinch_close"
+    else:
+        return "other"
+
+
+def safe_move_to_xyz(api, x, y, z, rHead=0):
+    print(f"Moving to: ({x}, {y}, {z}, rot={rHead}) with real-time safety tracking...")
+    
+    # Start the enqueued movement command
+    execCmd = dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJXYZMode, x, y, z, rHead, isQueued=1)[0]
+    
+    # Continuous camera read and hand tracking loop while the robot is moving
+    while execCmd > dType.GetQueuedCmdCurrentIndex(api)[0]:
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            continue
+
+        frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
+        display_frame = frame.copy()
+
+        # Re-use the pre-initialized global hands object for blazing speed!
+        result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+
+        if result.multi_hand_landmarks:
+            # Draw the full hand skeletal skeleton live on the GUI!
+            mp_drawing.draw_landmarks(
+                display_frame, result.multi_hand_landmarks[0], mp_hands.HAND_CONNECTIONS
+            )
+            
+            gesture = detect_gesture(result.multi_hand_landmarks[0])
+
+            # If a CLOSED FIST is detected during movement, immediately pause!
+            if gesture == "fist":
+                print("[SAFETY] Closed Fist detected! Interrupting and pausing robot arm immediately.")
+                
+                # Force stop execution of the current movement command
+                dType.SetQueuedCmdForceStopExec(api)
+                
+                # Raise the arm to safe height
+                dobotArm.move_to_xyz(api, x, y, Z_SAFE)
+
+                # Block in this pause loop UNTIL an "open_palm" gesture is shown to resume!
+                while True:
+                    ret2, frame2 = cap.read()
+                    if not ret2:
+                        continue
+
+                    frame2 = cv2.remap(frame2, map1, map2, cv2.INTER_LINEAR)
+                    display_frame_paused = frame2.copy()
+                    
+                    result2 = hands.process(cv2.cvtColor(frame2, cv2.COLOR_BGR2RGB))
+
+                    if result2.multi_hand_landmarks:
+                        # Draw hand skeletal landmarks on paused screen
+                        mp_drawing.draw_landmarks(
+                            display_frame_paused, result2.multi_hand_landmarks[0], mp_hands.HAND_CONNECTIONS
+                        )
+                        gesture2 = detect_gesture(result2.multi_hand_landmarks[0])
+
+                        # Only resume movement once an OPEN PALM gesture is detected!
+                        if gesture2 == "open_palm":
+                            print("[SAFETY] Open Palm detected. Resuming movement...")
+                            break
+                        
+                        cv2.putText(display_frame_paused, f"PAUSED - SHOW OPEN PALM TO RESUME (Current: {gesture2})", 
+                                    (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
+                    else:
+                        cv2.putText(display_frame_paused, "PAUSED - SHOW OPEN PALM TO RESUME (No Hand)", 
+                                    (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
+                        
+                    cv2.imshow("Detection", display_frame_paused)
+                    cv2.waitKey(1)
+
+                # Resume the queue execution and restart the move command
+                print("Resuming movement...")
+                dType.SetQueuedCmdStartExec(api)
+                execCmd = dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJXYZMode, x, y, z, rHead, isQueued=1)[0]
+
+        cv2.putText(display_frame, "ROBOT MOVING...", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        cv2.imshow("Detection", display_frame)
+        cv2.waitKey(1)
+
+
 # State machine logic to control the flow of the program through the three phases: scanning for plates, scanning for targets, and executing pick/place operations.
 # THIS STATE MACHINE IS TOO SIMPLE. Can you think of logics that should change the robot's sequnece of actions?
 # Ex: what if the robot fails to pick up a target? should it retry? should it go back to scanning for targets in case the target was moved? what if a new plate is added during the pick/place phase?
@@ -162,12 +293,19 @@ def phase_detect_plates():
         blurred = cv2.bilateralFilter(gaussian, bilateral_diameter, bilateral_sigma_color, bilateral_sigma_space)
         cv2.imshow("Blurred (Debug)", blurred)
         # set region of interest
-          # adjust these values
+        x, y, w, h = [200, 100, 300, 200]  # adjust these values
 
-        focus_area = blurred[y_focus:y_focus+h_focus, x_focus:x_focus+w_focus]
+        roi = blurred[y:y+h, x:x+w]
         
-        cv2.rectangle(display_frame, (x_focus, y_focus), (x_focus+w_focus, y_focus+h_focus), (0, 255, 0), 2)
-        circles = cv2.HoughCircles(focus_area, cv2.HOUGH_GRADIENT, 1, 150, param1=HOUGH_PARAM1, param2=HOUGH_PARAM2, minRadius=25, maxRadius=55)
+        cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+        
+        # Run EDCircles on the ROI
+        ed.detectEdges(roi)
+        ellipses = ed.detectEllipses()
+        
+        # Show debug edge map to see live edge segment extraction
+        edge_img = ed.getEdgeImage()
+        cv2.imshow("ED Edge Map (Debug)", edge_img)
 
         current_list = []
         if ellipses is not None:
@@ -238,11 +376,9 @@ def phase_detect_plates():
             return current_list
   
  
-  
-
 
 # ---------------------------------------------------------
-# PHASE 2: DETECT the target parts
+# PHASE 2: DETECT Red velcros to pick up (Red Blocks)
 # ---------------------------------------------------------
 def phase_detect_targets(targetPart: Part):
     print("\n[PHASE 2] Scanning for targets. Waiting for stability...")
@@ -261,6 +397,7 @@ def phase_detect_targets(targetPart: Part):
         focus_area = display_frame[y_focus:y_focus+h_focus, x_focus:x_focus+w_focus]
         targetPart.updateFrame(focus_area)
         cv2.rectangle(display_frame, (x_focus, y_focus), (x_focus+w_focus, y_focus+h_focus), (0, 255, 0), 2)
+        
         # Red Tag Logic
         mask = targetPart.returnMask()
         gitmask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
@@ -272,11 +409,11 @@ def phase_detect_targets(targetPart: Part):
                 M = cv2.moments(cnt)
                 if M["m00"] != 0:
                     cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
-
+                    
                     # --- This creates a bounding box rectangle, and gives back its dimensions
                     rect = cv2.minAreaRect(cnt)          # ((px,py),(w,h),angle) in PIXELS
                     box  = cv2.boxPoints(rect)           # 4 corner points (float)
-
+                    
                     # Calculation for finding the angle, using the shorter edge, to close upon
                     e1, e2 = box[1] - box[0], box[2] - box[1]
                     short_vec = e1 if np.linalg.norm(e1) < np.linalg.norm(e2) else e2
@@ -284,7 +421,7 @@ def phase_detect_targets(targetPart: Part):
                     if n < 1e-6:
                         continue
                     short_vec /= n      # (unit) vector
-
+                    
                     # Measure the angle in ROBOT space, not pixels: map the centre and a
                     # point one step along the short axis through the homography, then take
                     # the angle between them in mm. This auto-corrects for camera rotation.
@@ -294,9 +431,9 @@ def phase_detect_targets(targetPart: Part):
                                             cy + y_focus + short_vec[1]*STEP, H_matrix) # creates a delta-r
                     grip_angle = fold_angle(np.degrees(np.arctan2(ry1 - ry0, rx1 - rx0))
                                             + GRIPPER_ANGLE_OFFSET) #This find the angle using trig
-
+                    
                     current_list.append((rx0, ry0, grip_angle))   # <-- now a 3-tuple
-
+                    
                     # visual feedback
                     box_full = (box + np.array([x_focus, y_focus])).astype(np.int32)
                     cv2.drawContours(display_frame, [box_full], -1, (0, 255, 0), 2)
@@ -324,16 +461,12 @@ def phase_detect_targets(targetPart: Part):
         # --- EXIT CONDITION ---
         if stability_counter >= STABILITY_LIMIT:
             print(f"[SUCCESS] Locked {len(current_list)} targets.")
-            #cv2.waitKey(500) # Brief pause so you can see the 100%
-    
             return current_list
 
 
 # ---------------------------------------------------------
 # PHASE 3: PICK/PLACE LOOP
 # This function assumes 1 drop zone only has 1 part, and executes the pick/place operations in batches.
-# if you are picking up rigid car parts, would you still be able to move directly to the object and to the drop zone? 
-# Do you need collision avoidance? Think about if the robot gripper accidentally hits the plate or other parts on the way to the target, what would happen? How would you modify the robot's movement logic to avoid collisions?
 # ---------------------------------------------------------
 def phase_execute_batch(api, pick_list, drop_list):
     cv2.VideoCapture(0)
@@ -354,57 +487,71 @@ def phase_execute_batch(api, pick_list, drop_list):
         print(f"Task {i+1}: Moving {pick_x, pick_y} to {drop_x, drop_y}, rotated to angle {pick_angle}")
 
         # --- PICK SEQUENCE ---
-        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, pick_angle)
-        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK, pick_angle)
-        #optional alternate function call method to include a rotation of the gripper angle
-        #dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, 45) 
+        safe_move_to_xyz(api, pick_x, pick_y, Z_SAFE, pick_angle)
+        safe_move_to_xyz(api, pick_x, pick_y, Z_PICK, pick_angle)
 
         dobotArm.close_gripper(api)
-        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, pick_angle)
+        safe_move_to_xyz(api, pick_x, pick_y, Z_SAFE, pick_angle)
 
         # --- PLACE SEQUENCE ---
-        dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
+        safe_move_to_xyz(api, drop_x, drop_y, Z_SAFE)
         dobotArm.open_gripper(api)
         dobotArm.stop_pump(api)
-        dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
-
-    # irl, it is ok for 1 dish to contain multiple parts
-    # if len(pick_list) > len(drop_list):
-    #     for i in range(len(pick_list)):
-    #         pick_x, pick_y = pick_list[i]
-    #         drop_x, drop_y = drop_list[0]
-    #         # --- PICK SEQUENCE ---
-    #         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
-    #         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK)
-    #         dobotArm.close_gripper(api)
-    #         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
-
-    #     # --- PLACE SEQUENCE ---
-    #         dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
-    #         dobotArm.open_gripper(api)
-    #         dobotArm.stop_pump(api)
-    #         dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
+        safe_move_to_xyz(api, drop_x, drop_y, Z_SAFE)
 
     print("\nBatch Complete.")
     return True
- 
+
 def phase_pick_place(target: Part):
-    print("\n[PHASE 3] Executing pick/place operations.")
     # This function can be used if you want to execute pick/place one by one with more complex logic in between, rather than in batches.
     while machine_state == "scanning target":
-    
         pick_target = phase_detect_targets(target)
         if pick_target is not None:
             next_state()
+            
+    # --- PHASE 3 ACTIVATION LOCK: Only starts Phase 3 after detection of an "open_palm" gesture ---
+    print("\n[PHASE 3 STANDBY] Target detection complete. Show OPEN PALM gesture to authorize and launch the robot arm movement!")
+    while True:
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            continue
+            
+        frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
+        display_frame = frame.copy()
+        
+        result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        gesture = "neutral"
+        
+        if result.multi_hand_landmarks:
+            mp_drawing.draw_landmarks(
+                display_frame, result.multi_hand_landmarks[0], mp_hands.HAND_CONNECTIONS
+            )
+            gesture = detect_gesture(result.multi_hand_landmarks[0])
+            
+            # Authorize and break into Phase 3 once an open palm is shown!
+            if gesture == "open_palm":
+                print("[SAFETY] Open Palm detected! Authorization granted, launching Phase 3 movement...")
+                break
+                
+            cv2.putText(display_frame, f"STANDBY - SHOW OPEN PALM TO START (Current: {gesture})", 
+                        (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
+        else:
+            cv2.putText(display_frame, "STANDBY - SHOW OPEN PALM TO START (No Hand)", 
+                        (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
+                        
+        cv2.imshow("Detection", display_frame)
+        cv2.waitKey(1)
+        
     cap.release()
+    
     while machine_state == "pick place":
         completed = phase_execute_batch(api, pick_target, drop_zone)
         if completed:
             next_state()
         else: break
-
         pass
     cap.open(cam_index, cam_backend)
+ 
 
 # ---------------------------------------------------------
 # MAIN EXECUTION
@@ -435,7 +582,6 @@ while machine_state == "scanning plate":
 phase_pick_place(velcro)
 machine_state = "scanning target"
 phase_pick_place(purpleLegoBrick)
-
 
 cap.release()
 cv2.destroyAllWindows()
