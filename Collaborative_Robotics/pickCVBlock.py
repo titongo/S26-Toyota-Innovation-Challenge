@@ -99,6 +99,7 @@ def phase_detect_plates():
     print("\n[PHASE 1] Scanning for drop zones (using EDCircles). Waiting for stability...")
     stability_counter = 0
     last_count = 0
+    frame_count = 0  # Counter to prevent flooding console with debug prints
     
     # Bilateral filter local tuning parameters for shiny metal disk detection
     bilateral_diameter = 12
@@ -121,6 +122,11 @@ def phase_detect_plates():
     ed.setParams(params)
     
     while True:
+        frame_count += 1
+        log_debug = (frame_count % 30 == 0) # Log every 30 frames (~once per second)
+        
+        if log_debug:
+            print("\n--- [EDCircles Debug Log] ---")
         ret, frame = cap.read()
         frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
         display_frame = frame.copy()
@@ -148,16 +154,27 @@ def phase_detect_plates():
 
         current_list = []
         if ellipses is not None:
-            for ellipse in ellipses[0]:
-                # If element index 2 > 0, it was detected as a pure circle by EDCircles
-                if ellipse[2] > 0:
+            if log_debug:
+                print(f"Total shapes detected by EDCircles: {len(ellipses[0])}")
+                
+            for idx, ellipse in enumerate(ellipses[0]):
+                is_pure_circle = ellipse[2] > 0
+                
+                if is_pure_circle:
                     cx_roi, cy_roi, r = int(ellipse[0]), int(ellipse[1]), int(ellipse[2])
+                    if log_debug:
+                        print(f"  [{idx}] Pure Circle at ({cx_roi}, {cy_roi}) with radius {r}px")
                 else:
-                    # Else check if the ellipse is highly circular (semi-major / semi-minor < 1.2)
                     r_major, r_minor = ellipse[3], ellipse[4]
-                    if r_minor > 0 and (r_major / r_minor) < 1.2:
-                        cx_roi, cy_roi, r = int(ellipse[0]), int(ellipse[1]), int((r_major + r_minor) / 2)
-                    else:
+                    ratio = r_major / r_minor if r_minor > 0 else 0
+                    cx_roi, cy_roi, r = int(ellipse[0]), int(ellipse[1]), int((r_major + r_minor) / 2)
+                    
+                    if log_debug:
+                        print(f"  [{idx}] Ellipse at ({cx_roi}, {cy_roi}): major={r_major:.1f}px, minor={r_minor:.1f}px, ratio={ratio:.2f}")
+                    
+                    if r_minor <= 0 or ratio >= 1.2:
+                        if log_debug:
+                            print(f"      -> REJECTED: Not circular enough (ratio {ratio:.2f} >= 1.2)")
                         continue
                 
                 # Filter circles in the expected radius range (25 to 55 pixels)
@@ -177,6 +194,14 @@ def phase_detect_plates():
                     smooth_ry = sum(p[1] for p in coordinate_history) / len(coordinate_history)
                     
                     current_list.append((smooth_rx, smooth_ry))
+                    if log_debug:
+                        print(f"      -> ACCEPTED: Radius {r}px in range [25, 55], smoothed robot pos=({smooth_rx:.1f}, {smooth_ry:.1f})")
+                else:
+                    if log_debug:
+                        print(f"      -> REJECTED: Radius {r}px is outside expected range [25, 55]")
+        else:
+            if log_debug:
+                print("No shapes detected by Edge Drawing algorithm. (Tip: Try adjusting lighting, focus, or lowering GradientThresholdValue)")
 
         # --- AUTO-LOCK LOGIC ---
         if len(current_list) > 0 and len(current_list) == last_count:
