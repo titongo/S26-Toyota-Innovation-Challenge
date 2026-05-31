@@ -26,6 +26,10 @@ import os
 
 import libteam21
 
+#>>> DEPTH ADD (1/7): OpenNI2 is how the Astra Pro NL exposes its depth stream
+from openni import openni2
+from openni import _openni2 as c_api
+#<<< END DEPTH ADD (1/7)
 
 """CONSTANTS"""
 
@@ -36,6 +40,20 @@ PIXEL_TOLERANCE = 10  #object can move at most this # of pixels to be considered
 
 #Angle to calibrate grip
 GRIPPER_ANGLE_OFFSET = -45   # degrees.
+
+# >>> DEPTH ADD (2/7): dynamic-Z constants + load the depth->robotZ calibration
+OPENNI_REDIST = r"C:\Path\To\OpenNI2\Redist"   # <-- EDIT: folder from the Orbbec OpenNI2 SDK, THIS NEEDS CHANGE
+Z_MIN        = Z_PICK    # absolute floor: the gripper may NEVER descend below this (mm). Safety.
+GRIP_DESCEND = 12.0      # how far below an object's TOP surface to close the jaws (mm)
+ 
+# robot_Z = DEPTH_A * depth_mm + DEPTH_B  (created by calibrateDepth.py -- run that once first)
+try:
+    _dc = np.load("depth_calib.npz")
+    DEPTH_A, DEPTH_B = float(_dc["a"]), float(_dc["b"])
+except FileNotFoundError:
+    raise SystemExit("depth_calib.npz not found -- run calibrateDepth.py once before this script.")
+# <<< END DEPTH ADD (2/7)
+ 
 
 
 # --- PHASE 1 TUNING PARAMETERS (set via environment variables) ---
@@ -67,6 +85,22 @@ new_K, roi = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (w,h), 1)
 map1, map2 = cv2.initUndistortRectifyMap(camera_matrix, dist_coeffs, None, new_K, (w,h), cv2.CV_16SC2)
 
 
+
+# >>> DEPTH ADD (3/7): open the Astra depth stream (runs alongside the colour `cap`)
+COLOR_H, COLOR_W = frame.shape[:2]      # colour-image size, for scaling pixels to the depth grid
+DEPTH_W, DEPTH_H = 640, 480             # Astra depth resolution
+ 
+openni2.initialize(OPENNI_REDIST)
+_dev = openni2.Device.open_any()
+depth_stream = _dev.create_depth_stream()
+depth_stream.set_video_mode(c_api.OniVideoMode(
+    pixelFormat=c_api.OniPixelFormat.ONI_PIXEL_FORMAT_DEPTH_1_MM,   # readings come out in millimetres
+    resolutionX=DEPTH_W, resolutionY=DEPTH_H, fps=30))
+depth_stream.start()
+# <<< END DEPTH ADD (3/7)
+
+
+
 # Init the focus area values
 x_focus, y_focus, w_focus, h_focus = [200, 210, 300, 200]
 
@@ -83,6 +117,32 @@ def fold_angle(a):
     while a > 90:   a -= 180
     while a <= -90: a += 180
     return a
+
+
+# >>> DEPTH ADD (4/7): depth helpers
+def grab_depth_mm():
+    # one fresh depth frame as a HxW array of millimetres (0 = no reading)
+    f = depth_stream.read_frame()
+    return np.frombuffer(f.get_buffer_as_uint16(), np.uint16).reshape(f.height, f.width)
+ 
+def color_px_to_depth_px(cx, cy):
+    # colour and depth can be different resolutions -> scale the pixel onto the depth grid
+    return int(cx * DEPTH_W / COLOR_W), int(cy * DEPTH_H / COLOR_H)
+ 
+def depth_at(depth_img, cx, cy, k=4):
+    # robust mm reading: median of the valid (nonzero) pixels in a small patch
+    u, v = color_px_to_depth_px(cx, cy)
+    patch = depth_img[max(0, v-k):v+k+1, max(0, u-k):u+k+1]
+    vals = patch[patch > 0]
+    return float(np.median(vals)) if vals.size else None
+ 
+def depth_to_robot_z(d_mm):
+    # turn a camera depth (mm) into the object's TOP-surface height in robot Z
+    return DEPTH_A * d_mm + DEPTH_B
+# <<< END DEPTH ADD (4/7)
+
+
+
 # State machine logic to control the flow of the program through the three phases: scanning for plates, scanning for targets, and executing pick/place operations.
 # THIS STATE MACHINE IS TOO SIMPLE. Can you think of logics that should change the robot's sequnece of actions?
 # Ex: what if the robot fails to pick up a target? should it retry? should it go back to scanning for targets in case the target was moved? what if a new plate is added during the pick/place phase?
@@ -245,6 +305,11 @@ def phase_detect_targets(targetPart: Part):
         
         focus_area = display_frame[y_focus:y_focus+h_focus, x_focus:x_focus+w_focus]
         targetPart.updateFrame(focus_area)
+
+        # >>> DEPTH ADD (5/7): one depth frame per loop, sampled per-object below
+        depth_img = grab_depth_mm()
+        # <<< END DEPTH ADD (5/7)
+        
         cv2.rectangle(display_frame, (x_focus, y_focus), (x_focus+w_focus, y_focus+h_focus), (0, 255, 0), 2)
         # Red Tag Logic
         mask = targetPart.returnMask()
@@ -279,8 +344,15 @@ def phase_detect_targets(targetPart: Part):
                                             cy + y_focus + short_vec[1]*STEP, H_matrix) # creates a delta-r
                     grip_angle = fold_angle(np.degrees(np.arctan2(ry1 - ry0, rx1 - rx0))
                                             + GRIPPER_ANGLE_OFFSET) #This find the angle using trig
-
-                    current_list.append((rx0, ry0, grip_angle))   # <-- now a 3-tuple
+                    
+                    
+                    # >>> DEPTH ADD (6/7): read this object's height from the depth camera
+                    d_mm = depth_at(depth_img, cx, cy)
+                    if d_mm is None:
+                        continue                       # no depth reading here -> skip this object
+                    z_top = depth_to_robot_z(d_mm)     # object's TOP surface in robot Z (mm)
+                    current_list.append((rx0, ry0, grip_angle, z_top))   # <-- now a 4-tuple
+                    # <<< END DEPTH ADD (6/7)
 
                     # visual feedback
                     box_full = (box + np.array([x_focus, y_focus])).astype(np.int32)
@@ -333,14 +405,16 @@ def phase_execute_batch(api, pick_list, drop_list):
     print(f"\n[PHASE 3] Executing batch of {batch_size} operations.")
 
     for i in range(batch_size):
-        pick_x, pick_y, pick_angle = pick_list[i]   # angle value added
+        pick_x, pick_y, pick_angle, z_top = pick_list[i]   # angle value added
         drop_x, drop_y = drop_list[i]
 
+        pick_z = max(z_top, Z_MIN) # takes the z value of the object unless it's below the min threshold
+ 
         print(f"Task {i+1}: Moving {pick_x, pick_y} to {drop_x, drop_y}, rotated to angle {pick_angle}")
 
         # --- PICK SEQUENCE ---
         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, pick_angle)
-        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK, pick_angle)
+        dobotArm.move_to_xyz(api, pick_x, pick_y, pick_z, pick_angle)
         #optional alternate function call method to include a rotation of the gripper angle
         #dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, 45) 
 
@@ -424,3 +498,5 @@ phase_pick_place(purpleLegoBrick)
 
 cap.release()
 cv2.destroyAllWindows()
+depth_stream.stop()
+openni2.unload()
