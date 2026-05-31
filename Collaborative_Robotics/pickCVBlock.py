@@ -23,6 +23,7 @@ import numpy as np
 import cv2
 import time
 import os
+import mediapipe as mp
 
 import libteam21
 
@@ -75,6 +76,21 @@ map1, map2 = cv2.initUndistortRectifyMap(camera_matrix, dist_coeffs, None, new_K
 # Init the focus area values
 x_focus, y_focus, w_focus, h_focus = [200, 210, 300, 200]
 
+# --- HAND DETECTION (MediaPipe) ---
+_mp_hands = mp.solutions.hands
+hand_detector = _mp_hands.Hands(
+    static_image_mode=False,
+    max_num_hands=2,
+    min_detection_confidence=0.6,
+    min_tracking_confidence=0.5,
+)
+
+
+def detect_hand_in_focus(focus_bgr):
+    """Return True if MediaPipe detects at least one hand in the focus area."""
+    rgb = cv2.cvtColor(focus_bgr, cv2.COLOR_BGR2RGB)
+    result = hand_detector.process(rgb)
+    return result.multi_hand_landmarks is not None
 
 def pixel_to_robot(u, v, H):
     p = np.array([u, v, 1])
@@ -167,7 +183,12 @@ def phase_detect_plates():
         focus_area = blurred[y_focus:y_focus+h_focus, x_focus:x_focus+w_focus]
         
         cv2.rectangle(display_frame, (x_focus, y_focus), (x_focus+w_focus, y_focus+h_focus), (0, 255, 0), 2)
-        circles = cv2.HoughCircles(focus_area, cv2.HOUGH_GRADIENT, 1, 150, param1=HOUGH_PARAM1, param2=HOUGH_PARAM2, minRadius=25, maxRadius=55)
+        # Run EDCircles on the ROI
+        ed.detectEdges(focus_area)
+        ellipses = ed.detectEllipses()
+
+        edge_img = ed.getEdgeImage()
+        cv2.imshow("ED Edge Map (Debug)", edge_img)
 
         current_list = []
         if ellipses is not None:
@@ -196,9 +217,8 @@ def phase_detect_plates():
                 
                 # Filter circles in the expected radius range (18 to 55 pixels)
                 if 18 <= r <= 55:
-                    full_x = cx_roi + x      # Add ROI x offset (200)
-                    
-                    full_y = cy_roi + y      # Add ROI y offset (100)
+                    full_x = cx_roi + x_focus
+                    full_y = cy_roi + y_focus
                     
                     cv2.circle(display_frame, (full_x, full_y), r, (0, 255, 0), 2)
                     rx, ry = pixel_to_robot(full_x, full_y, H_matrix)
@@ -263,8 +283,8 @@ def phase_detect_targets(targetPart: Part):
         cv2.rectangle(display_frame, (x_focus, y_focus), (x_focus+w_focus, y_focus+h_focus), (0, 255, 0), 2)
         # Red Tag Logic
         mask = targetPart.returnMask()
-        gitmask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cleaned_mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
+        contours, _ = cv2.findContours(cleaned_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         current_list = []
         for cnt in contours:
@@ -305,6 +325,18 @@ def phase_detect_targets(targetPart: Part):
                     
         cv2.waitKey(1)
 
+        # --- HAND SAFETY CHECK (phase 2) ---
+        if detect_hand_in_focus(focus_area):
+            print("[SAFETY] Hand detected in focus area! Resetting target scan.")
+            stability_counter = 0
+            last_count = 0
+            current_list = []
+            cv2.putText(display_frame, "HAND DETECTED - RESETTING", (20, 70),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.imshow("Detection", display_frame)
+            cv2.waitKey(1)
+            continue
+
         # --- STABILITY LOGIC ---
         if len(current_list) != 0:
             if len(current_list) > 0 and len(current_list) == last_count:
@@ -316,8 +348,8 @@ def phase_detect_targets(targetPart: Part):
         # Visual Feedback
         progress = int((stability_counter / STABILITY_LIMIT) * 100)
         color = (0, 255, 0) if progress < 100 else (255, 255, 0)
-        
-        cv2.putText(display_frame, f"LOCKING TARGETS: {progress}%", (20, 40), 
+
+        cv2.putText(display_frame, f"LOCKING TARGETS: {progress}%", (20, 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
         cv2.imshow("Detection", display_frame)
         
@@ -336,7 +368,6 @@ def phase_detect_targets(targetPart: Part):
 # Do you need collision avoidance? Think about if the robot gripper accidentally hits the plate or other parts on the way to the target, what would happen? How would you modify the robot's movement logic to avoid collisions?
 # ---------------------------------------------------------
 def phase_execute_batch(api, pick_list, drop_list):
-    cv2.VideoCapture(0)
     time.sleep(0.5)
     
     if len(pick_list) == 0 or len(drop_list) == 0:
@@ -352,6 +383,16 @@ def phase_execute_batch(api, pick_list, drop_list):
         drop_x, drop_y = drop_list[i]
 
         print(f"Task {i+1}: Moving {pick_x, pick_y} to {drop_x, drop_y}, rotated to angle {pick_angle}")
+
+        # --- HAND SAFETY CHECK (phase 3) ---
+        ret, frame = cap.read()
+        if ret and frame is not None:
+            focus_area = frame[y_focus:y_focus+h_focus, x_focus:x_focus+w_focus]
+            if detect_hand_in_focus(focus_area):
+                print("[SAFETY] Hand detected during pick/place! Aborting batch.")
+                dobotArm.open_gripper(api)
+                dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, pick_angle)
+                return "hand"
 
         # --- PICK SEQUENCE ---
         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, pick_angle)
@@ -389,22 +430,21 @@ def phase_execute_batch(api, pick_list, drop_list):
     return True
  
 def phase_pick_place(target: Part):
+    global machine_state
     print("\n[PHASE 3] Executing pick/place operations.")
-    # This function can be used if you want to execute pick/place one by one with more complex logic in between, rather than in batches.
     while machine_state == "scanning target":
-    
         pick_target = phase_detect_targets(target)
         if pick_target is not None:
             next_state()
-    cap.release()
     while machine_state == "pick place":
-        completed = phase_execute_batch(api, pick_target, drop_zone)
-        if completed:
+        result = phase_execute_batch(api, pick_target, drop_zone)
+        if result == "hand":
+            print("[SAFETY] Restarting from phase 2 (target scan).")
+            machine_state = "scanning target"
+        elif result:
             next_state()
-        else: break
-
-        pass
-    cap.open(cam_index, cam_backend)
+        else:
+            break
 
 # ---------------------------------------------------------
 # MAIN EXECUTION
