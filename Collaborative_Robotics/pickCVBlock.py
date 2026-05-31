@@ -28,6 +28,21 @@ import sys
 import libteam21
 import mediapipe as mp
 
+try:
+    import mediapipe.solutions.hands as mp_hands
+    import mediapipe.solutions.drawing_utils as mp_drawing
+except ImportError:
+    import mediapipe.python.solutions.hands as mp_hands
+    import mediapipe.python.solutions.drawing_utils as mp_drawing
+
+# Initialize a single global MediaPipe Hands tracker to prevent re-initialization lag
+hands = mp_hands.Hands(
+    static_image_mode=False,
+    max_num_hands=2,
+    min_detection_confidence=0.6,
+    min_tracking_confidence=0.6
+)
+
 
 """CONSTANTS"""
 
@@ -75,7 +90,6 @@ else:
     print("Error: camera_params.npz not found!")
     sys.exit(1)
 
-# Ensure data is parsed correctly
 camera_matrix = data["camera_matrix"]
 dist_coeffs   = data["dist_coeffs"]
 
@@ -120,62 +134,47 @@ def detect_gesture(hand_landmarks):
 def safe_move_to_xyz(api, x, y, z):
     while True:
         ret, frame = cap.read()
-        if not ret:
+        if not ret or frame is None:
             continue
 
         frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
+        display_frame = frame.copy()
 
-        with mp.solutions.hands.Hands(
-            static_image_mode=False,
-            max_num_hands=2,
-            min_detection_confidence=0.6,
-            min_tracking_confidence=0.6
-        ) as hands:
+        # Re-use the fast global hands tracker
+        result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
-            result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        if result.multi_hand_landmarks:
+            print("[SAFETY] Hand detected in workspace! Robot paused immediately.")
+            
+            # Immediately move to safe vertical height
+            dobotArm.move_to_xyz(api, x, y, Z_SAFE)
 
-            if result.multi_hand_landmarks:
-                gesture = detect_gesture(result.multi_hand_landmarks[0])
-
-                if gesture == "pinch_open":
-                    print("[GESTURE] Thumb-index open detected. Opening gripper.")
-                    dobotArm.open_gripper(api)
+            # Block in pause loop until hand is completely removed from the frame
+            while True:
+                ret2, frame2 = cap.read()
+                if not ret2 or frame2 is None:
                     continue
 
-                elif gesture == "pinch_close":
-                    print("[GESTURE] Thumb-index close detected. Closing gripper.")
-                    dobotArm.close_gripper(api)
-                    continue
+                frame2 = cv2.remap(frame2, map1, map2, cv2.INTER_LINEAR)
+                display_frame_paused = frame2.copy()
+                
+                result2 = hands.process(cv2.cvtColor(frame2, cv2.COLOR_BGR2RGB))
 
-                elif gesture == "open_palm":
-                    print("[SAFETY] Open palm detected. Robot paused.")
+                # If no hand is detected in frame anymore, resume immediately!
+                if not result2.multi_hand_landmarks:
+                    print("[SAFETY] Hand removed. Resuming movement.")
+                    break
 
-                    dobotArm.move_to_xyz(api, x, y, Z_SAFE)
+                # Draw skeleton connections
+                mp_drawing.draw_landmarks(
+                    display_frame_paused, result2.multi_hand_landmarks[0], mp_hands.HAND_CONNECTIONS
+                )
+                cv2.putText(display_frame_paused, "PAUSED - HAND IN WORKSPACE", 
+                            (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                cv2.imshow("Detection", display_frame_paused)
+                cv2.waitKey(1)
 
-                    while True:
-                        ret, frame = cap.read()
-                        if not ret:
-                            continue
-
-                        frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
-                        result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-
-                        if result.multi_hand_landmarks:
-                            gesture = detect_gesture(result.multi_hand_landmarks[0])
-
-                            if gesture == "pinch_open":
-                                print("[GESTURE] Thumb-index open detected. Opening gripper.")
-                                dobotArm.open_gripper(api)
-
-                            elif gesture == "pinch_close":
-                                print("[GESTURE] Thumb-index close detected. Closing gripper.")
-                                dobotArm.close_gripper(api)
-
-                            elif gesture == "fist":
-                                print("[SAFETY] Fist detected. Resuming.")
-                                break
-
-                    continue
+            continue
 
         break
 
