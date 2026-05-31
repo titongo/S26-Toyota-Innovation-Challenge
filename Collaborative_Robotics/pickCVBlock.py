@@ -102,8 +102,28 @@ def fold_angle(a):
 
 
 def safe_move_to_xyz(api, x, y, z, rHead=0):
-    # Hand detection completely removed to prevent USB bus latency issues, thread locks, and webcam-sharing freezes
-    dobotArm.move_to_xyz(api, x, y, z, rHead)
+    print(f"Moving to: ({x}, {y}, {z}, rot={rHead}) with real-time video refresh...")
+    
+    # Enqueue command cleanly using isQueued=1 to track transit progress
+    execCmd = dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJXYZMode, x, y, z, rHead, isQueued=1)[0]
+    
+    # Continuous camera read and GUI waitKey pump loop while the robot is moving
+    # This prevents the operating system's window manager from flagging the window as "Not Responding" and freezing/grey-outing!
+    # Contains absolutely 0% MediaPipe hand tracking or ML processing to prevent any latency, freezes, or thread deadlocks!
+    while execCmd > dType.GetQueuedCmdCurrentIndex(api)[0]:
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            # If camera fails or is released, just pump Qt event loop via pollKey to keep window alive
+            cv2.pollKey()
+            dType.dSleep(25)
+            continue
+
+        frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
+        display_frame = frame.copy()
+
+        cv2.putText(display_frame, "ROBOT MOVING...", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        cv2.imshow("Detection", display_frame)
+        cv2.waitKey(1)
 
 
 # State machine logic to control the flow of the program through the three phases: scanning for plates, scanning for targets, and executing pick/place operations.
@@ -386,8 +406,7 @@ def phase_pick_place(target: Part):
             next_state()
             
     # --- PHASE 3 ACTIVATION LOCK ---
-    # Re-enabled original clean camera release logic to completely free up the webcam/bus resources during movements
-    cap.release()
+    # Camera must remain open during Phase 3 movement transits so safe_move_to_xyz can refresh the video and GUI window dynamically!
     
     while machine_state == "pick place":
         completed = phase_execute_batch(api, pick_target, drop_zone)
@@ -395,7 +414,6 @@ def phase_pick_place(target: Part):
             next_state()
         else: break
         pass
-    cap.open(cam_index, cam_backend)
  
 
 # ---------------------------------------------------------
