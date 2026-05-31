@@ -14,7 +14,7 @@ CON_STR = {
     dType.DobotConnect.DobotConnect_Occupied: "DobotConnect_Occupied"
 }
 
-cam_index, cam_backend = libteam21.autoSelectCamera()
+cam_index, cam_backend = libteam21.auto_select_camera()
 cam = cv2.VideoCapture(cam_index, cam_backend)
 
 if not cam.isOpened():
@@ -22,7 +22,7 @@ if not cam.isOpened():
     exit()
     
 #if the program errors for file path problems, copy the relative path to camera_params.npz and paste it here and try again. 
-data = np.load("Collaborative_Robotics/camera_params.npz")
+data = np.load("camera_params.npz")
 camera_matrix = data["camera_matrix"]
 dist_coeffs   = data["dist_coeffs"]
 
@@ -72,6 +72,7 @@ def preview_camera():
             exit()
 
 api = dType.load()
+# dobotArm.close_gripper(api)
 
 # robot coordinates in mm
 robot_points = np.array([
@@ -144,7 +145,7 @@ def collect_calibration():
         print("Moving robot to:", pt)
 
         # move to pick height
-        dobotArm.move_to_xyz(api, x, y, -24)
+        dobotArm.move_to_xyz(api, x, y, -35)
 
         print("Press SPACE when robot is in position")
         
