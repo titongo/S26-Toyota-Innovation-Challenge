@@ -34,14 +34,6 @@ Z_PICK = -64 #what is the  height for the robot claw to successfully pick up the
 STABILITY_LIMIT = 60  #how many consecutive frames of stable detection before we "lock in" the positions and move to the next phase? (at 30fps, 60 frames is about 2 seconds)
 PIXEL_TOLERANCE = 10  #object can move at most this # of pixels to be considered stationary
 
-# --- PHASE 1 TUNING PARAMETERS (set via environment variables) ---
-# For shiny metal disk detection, use lower param1/param2 and aggressive bilateral filtering
-BILATERAL_DIAMETER = int(os.getenv("BILATERAL_D", 9))
-BILATERAL_SIGMA_COLOR = int(os.getenv("BILATERAL_SC", 40))
-BILATERAL_SIGMA_SPACE = int(os.getenv("BILATERAL_SS", 40))
-HOUGH_PARAM1 = int(os.getenv("HOUGH_PARAM1", 80))  # Lower for reflective surfaces
-HOUGH_PARAM2 = int(os.getenv("HOUGH_PARAM2", 20))  # Lower for reflective surfaces
-
 machine_state = "scanning plate"
 
 # --- INITIALIZATION FOR CAMERA TRANSFORMATION ---
@@ -108,13 +100,18 @@ def phase_detect_plates():
     stability_counter = 0
     last_count = 0
     
+    # Bilateral filter local tuning parameters for shiny metal disk detection
+    bilateral_diameter = 12
+    bilateral_sigma_color = 40
+    bilateral_sigma_space = 40
+    
     # Initialize Edge Drawing object for EDCircles
     ed = cv2.ximgproc.createEdgeDrawing()
     
     # Universal parameters initialization (works perfectly on both Windows and Linux)
     params = ed.Params()
     params.EdgeDetectionOperator = cv2.ximgproc.EdgeDrawing_SOBEL
-    params.GradientThresholdValue = 12  # Lower to capture softer/reflective metallic edges
+    params.GradientThresholdValue = 6  # Lower to capture softer/reflective metallic edges
     params.AnchorThresholdValue = 2     # Lower to extract more edge anchors
     params.NFAValidation = False        # Disable strict false alarm validation to detect shiny/broken discs
     params.MinPathLength = 10
@@ -124,9 +121,13 @@ def phase_detect_plates():
         ret, frame = cap.read()
         frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
         display_frame = frame.copy()
-        
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.bilateralFilter(gray, BILATERAL_DIAMETER, BILATERAL_SIGMA_COLOR, BILATERAL_SIGMA_SPACE)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))     
+
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        gaussian = cv2.GaussianBlur(hsv, (7, 7), 1.5)      # or cv2.medianBlur(img, 5)
+
+        blurred = cv2.bilateralFilter(gaussian, bilateral_diameter, bilateral_sigma_color, bilateral_sigma_space)
+        cv2.imshow("Blurred (Debug)", blurred)
         # set region of interest
         x, y, w, h = [200, 100, 300, 200]  # adjust these values
 
