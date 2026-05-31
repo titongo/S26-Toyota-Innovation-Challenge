@@ -67,6 +67,11 @@ h, w = frame.shape[:2]
 new_K, roi = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (w,h), 1)
 map1, map2 = cv2.initUndistortRectifyMap(camera_matrix, dist_coeffs, None, new_K, (w,h), cv2.CV_16SC2)
 
+
+# Init the focus area values
+x_focus, y_focus, w_focus, h_focus = [200, 210, 300, 200]
+
+
 def pixel_to_robot(u, v, H):
     p = np.array([u, v, 1])
     xy = H @ p
@@ -110,39 +115,107 @@ def next_state():
 # this script assumes a metallic circular plate as the drop zone, but you can modify the detection logic to fit your specific use case.
 # ---------------------------------------------------------
 def phase_detect_plates():
-    print("\n[PHASE 1] Scanning for drop zones. Waiting for stability...")
-    print(f"[DEBUG] Using parameters - BilateralFilter({BILATERAL_DIAMETER}, {BILATERAL_SIGMA_COLOR}, {BILATERAL_SIGMA_SPACE}), HoughCircles(param1={HOUGH_PARAM1}, param2={HOUGH_PARAM2})")
+    print("\n[PHASE 1] Scanning for drop zones (using EDCircles). Waiting for stability...")
     stability_counter = 0
     last_count = 0
+    frame_count = 0  # Counter to prevent flooding console with debug prints
+    
+    # Bilateral filter local tuning parameters for shiny metal disk detection
+    bilateral_diameter = 12
+    bilateral_sigma_color = 40
+    bilateral_sigma_space = 40
+    
+    # Sliding window coordinate history to filter out frame-by-frame jittering
+    coordinate_history = []
+    
+    # Initialize Edge Drawing object for EDCircles
+    ed = cv2.ximgproc.createEdgeDrawing()
+    
+    # Universal parameters initialization (works perfectly on both Windows and Linux)
+    params = ed.Params()
+    params.EdgeDetectionOperator = cv2.ximgproc.EdgeDrawing_SOBEL
+    params.GradientThresholdValue = 6  # Lower to capture softer/reflective metallic edges
+    params.AnchorThresholdValue = 2     # Lower to extract more edge anchors
+    params.NFAValidation = False        # Disable strict false alarm validation to detect shiny/broken discs
+    params.MinPathLength = 10
+    ed.setParams(params)
     
     while True:
+        frame_count += 1
+        log_debug = (frame_count % 30 == 0) # Log every 30 frames (~once per second)
+        
+        if log_debug:
+            print("\n--- [EDCircles Debug Log] ---")
         ret, frame = cap.read()
         frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
         frame = libteam21.boost_saturation(frame)
         display_frame = frame.copy()
-        
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        # blurred = cv2.medianBlur(gray, 7)
-        blurred = cv2.bilateralFilter(gray, BILATERAL_DIAMETER, BILATERAL_SIGMA_COLOR, BILATERAL_SIGMA_SPACE)
-        # set region of interest
-        x, y, w, h = [200, 210, 300, 200]  # adjust these values
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))     
 
-        roi = blurred[y:y+h, x:x+w]
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        gaussian = cv2.GaussianBlur(hsv, (7, 7), 1.5)      # or cv2.medianBlur(img, 5)
+
+        blurred = cv2.bilateralFilter(gaussian, bilateral_diameter, bilateral_sigma_color, bilateral_sigma_space)
+        cv2.imshow("Blurred (Debug)", blurred)
+        # set region of interest
+          # adjust these values
+
+        focus_area = blurred[y_focus:y_focus+h_focus, x_focus:x_focus+w_focus]
         
-        cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-        circles = cv2.HoughCircles(roi, cv2.HOUGH_GRADIENT, 1, 150, param1=HOUGH_PARAM1, param2=HOUGH_PARAM2, minRadius=25, maxRadius=55)
+        cv2.rectangle(display_frame, (x_focus, y_focus), (x_focus+w_focus, y_focus+h_focus), (0, 255, 0), 2)
+        circles = cv2.HoughCircles(focus_area, cv2.HOUGH_GRADIENT, 1, 150, param1=HOUGH_PARAM1, param2=HOUGH_PARAM2, minRadius=25, maxRadius=55)
 
         current_list = []
-        if circles is not None:
-            circles = np.uint16(np.around(circles))
-            for i in circles[0, :]:
-               # Convert from ROI-space to full-image space
-                full_x = i[0] + x      # Add ROI x offset (200)
-                full_y = i[1] + y      # Add ROI y offset (150)
+        if ellipses is not None:
+            if log_debug:
+                print(f"Total shapes detected by EDCircles: {len(ellipses[0])}")
                 
-                cv2.circle(display_frame, (full_x, full_y), i[2], (0, 255, 0), 2)
-                rx, ry = pixel_to_robot(full_x, full_y, H_matrix)
-                current_list.append((rx, ry))
+            for idx, ellipse in enumerate(ellipses[0]):
+                is_pure_circle = ellipse[2] > 0
+                
+                if is_pure_circle:
+                    cx_roi, cy_roi, r = int(ellipse[0]), int(ellipse[1]), int(ellipse[2])
+                    if log_debug:
+                        print(f"  [{idx}] Pure Circle at ({cx_roi}, {cy_roi}) with radius {r}px")
+                else:
+                    r_major, r_minor = ellipse[3], ellipse[4]
+                    ratio = r_major / r_minor if r_minor > 0 else 0
+                    cx_roi, cy_roi, r = int(ellipse[0]), int(ellipse[1]), int((r_major + r_minor) / 2)
+                    
+                    if log_debug:
+                        print(f"  [{idx}] Ellipse at ({cx_roi}, {cy_roi}): major={r_major:.1f}px, minor={r_minor:.1f}px, ratio={ratio:.2f}")
+                    
+                    if r_minor <= 0 or ratio >= 1.2:
+                        if log_debug:
+                            print(f"      -> REJECTED: Not circular enough (ratio {ratio:.2f} >= 1.2)")
+                        continue
+                
+                # Filter circles in the expected radius range (18 to 55 pixels)
+                if 18 <= r <= 55:
+                    full_x = cx_roi + x      # Add ROI x offset (200)
+                    
+                    full_y = cy_roi + y      # Add ROI y offset (100)
+                    
+                    cv2.circle(display_frame, (full_x, full_y), r, (0, 255, 0), 2)
+                    rx, ry = pixel_to_robot(full_x, full_y, H_matrix)
+                    
+                    # Apply moving average filter to smooth coordinates and prevent jitter
+                    coordinate_history.append((rx, ry))
+                    if len(coordinate_history) > 6:
+                        coordinate_history.pop(0)  # Keep the last 6 frames of history
+                    
+                    smooth_rx = sum(p[0] for p in coordinate_history) / len(coordinate_history)
+                    smooth_ry = sum(p[1] for p in coordinate_history) / len(coordinate_history)
+                    
+                    current_list.append((smooth_rx, smooth_ry))
+                    if log_debug:
+                        print(f"      -> ACCEPTED: Radius {r}px in range [18, 55], smoothed robot pos=({smooth_rx:.1f}, {smooth_ry:.1f})")
+                else:
+                    if log_debug:
+                        print(f"      -> REJECTED: Radius {r}px is outside expected range [18, 55]")
+        else:
+            if log_debug:
+                print("No shapes detected by Edge Drawing algorithm. (Tip: Try adjusting lighting, focus, or lowering GradientThresholdValue)")
 
         # --- AUTO-LOCK LOGIC ---
         if len(current_list) > 0 and len(current_list) == last_count:
@@ -159,6 +232,8 @@ def phase_detect_plates():
         if stability_counter >= STABILITY_LIMIT:
             print(f"Locked {len(current_list)} plates.")
             return current_list
+  
+ 
   
 
 
@@ -178,8 +253,10 @@ def phase_detect_targets(targetPart: Part):
         frame = libteam21.boost_saturation(frame)
         # Create a display copy so drawings don't affect next frame's HSV detection
         display_frame = frame.copy()
-        targetPart.updateFrame(frame)
         
+        focus_area = display_frame[y_focus:y_focus+h_focus, x_focus:x_focus+w_focus]
+        targetPart.updateFrame(focus_area)
+        cv2.rectangle(display_frame, (x_focus, y_focus), (x_focus+w_focus, y_focus+h_focus), (0, 255, 0), 2)
         # Red Tag Logic
         mask = targetPart.returnMask()
         gitmask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
@@ -208,17 +285,18 @@ def phase_detect_targets(targetPart: Part):
                     # point one step along the short axis through the homography, then take
                     # the angle between them in mm. This auto-corrects for camera rotation.
                     STEP = 20  # pixels
-                    rx0, ry0 = pixel_to_robot(cx, cy, H_matrix)
-                    rx1, ry1 = pixel_to_robot(cx + short_vec[0]*STEP,
-                                            cy + short_vec[1]*STEP, H_matrix) # creates a delta-r
+                    rx0, ry0 = pixel_to_robot(cx + x_focus, cy + y_focus, H_matrix)
+                    rx1, ry1 = pixel_to_robot(cx + x_focus + short_vec[0]*STEP,
+                                            cy + y_focus + short_vec[1]*STEP, H_matrix) # creates a delta-r
                     grip_angle = fold_angle(np.degrees(np.arctan2(ry1 - ry0, rx1 - rx0))
                                             + GRIPPER_ANGLE_OFFSET) #This find the angle using trig
 
                     current_list.append((rx0, ry0, grip_angle))   # <-- now a 3-tuple
 
                     # visual feedback
-                    cv2.drawContours(display_frame, [box.astype(np.int32)], -1, (0, 255, 0), 2)
-                    cv2.putText(display_frame, f"{grip_angle:.0f}", (cx, cy),
+                    box_full = (box + np.array([x_focus, y_focus])).astype(np.int32)
+                    cv2.drawContours(display_frame, [box_full], -1, (0, 255, 0), 2)
+                    cv2.putText(display_frame, f"{grip_angle:.0f}", (cx + x_focus, cy + y_focus),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
                     
         cv2.waitKey(1)
@@ -340,7 +418,7 @@ velcro  = Part(
     )
 purpleLegoBrick = Part(
         bounds=[
-            np.array([[125,100,80], [165,255,255]])
+            np.array([[125,100,70], [165,255,255]])
         ],
         minContourArea=20
     )
