@@ -124,6 +124,11 @@ smooth_rx, smooth_ry = 200.0, 0.0
 current_z = 30
 alpha = 0.35  # Exponential smoothing factor
 
+# State-change and throttling variables to prevent flooding the serial bus
+last_gripper_state = None  # Tracks open/closed to avoid spamming gripper commands
+last_sent_pos = [200.0, 0.0, 30.0]
+last_command_time = 0.0
+
 print("\n=== UNIFIED COBOT GESTURE SYSTEM ACTIVE ===")
 print("Use your hand gestures in front of the camera:")
 print("  - NO HAND / NEUTRAL: Robot automatically patrols back-and-forth.")
@@ -157,6 +162,8 @@ try:
         gesture = "neutral"
         status_text = "AUTO-PATROLLING..."
         status_color = (0, 255, 0)
+        pixel_x, pixel_y = 0, 0
+        index_tip = None
 
         if result.multi_hand_landmarks:
             hand_landmarks = result.multi_hand_landmarks[0]
@@ -174,7 +181,7 @@ try:
             cv2.circle(display_frame, (pixel_x, pixel_y), 10, (255, 255, 0), -1)
 
         # --- MODE TRANSITION STATE MACHINE ---
-        if gesture == "pinch" and result.multi_hand_landmarks:
+        if gesture == "pinch" and result.multi_hand_landmarks and index_tip is not None:
             # Direct Teleoperation Override Mode
             if current_mode != "Teleoperating":
                 print("[OVERRIDE] Pinch detected. Switching to Interactive Teleoperation!")
@@ -198,8 +205,16 @@ try:
             smooth_ry = (1 - alpha) * smooth_ry + alpha * target_ry
             current_z = (1 - alpha) * current_z + alpha * target_rz
 
-            # Issue immediate movement execution
-            dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJXYZMode, smooth_rx, smooth_ry, current_z, 0, isQueued=0)
+            # Throttled non-blocking serial communication to avoid clogging the buffer
+            now = time.time()
+            if now - last_command_time > 0.08:  # Maximum 12 commands per second
+                dist_moved = np.sqrt((smooth_rx - last_sent_pos[0])**2 + 
+                                     (smooth_ry - last_sent_pos[1])**2 + 
+                                     (current_z - last_sent_pos[2])**2)
+                if dist_moved > 3.0:  # Only issue command if target shifted by > 3mm
+                    dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJXYZMode, smooth_rx, smooth_ry, current_z, 0, isQueued=0)
+                    last_sent_pos = [smooth_rx, smooth_ry, current_z]
+                    last_command_time = now
 
         elif gesture == "open_palm":
             # Safety Pause Mode
@@ -213,12 +228,18 @@ try:
             status_text = "SAFETY PAUSE (OPEN PALM)"
             status_color = (0, 0, 255)
             
-            dobotArm.open_gripper(api)
-            dobotArm.stop_pump(api)
+            # State change lock to avoid spamming the gripper on every frame
+            if last_gripper_state != "open":
+                dobotArm.open_gripper(api)
+                dobotArm.stop_pump(api)
+                last_gripper_state = "open"
 
         elif gesture == "fist":
-            # Fist gesture closes gripper and can resume patrolling if paused
-            dobotArm.close_gripper(api)
+            # State change lock to avoid spamming the gripper on every frame
+            if last_gripper_state != "closed":
+                dobotArm.close_gripper(api)
+                last_gripper_state = "closed"
+                
             if current_mode == "Paused":
                 print("[SAFETY] Fist gesture. Resuming patrolling...")
                 current_mode = "Patrolling"
