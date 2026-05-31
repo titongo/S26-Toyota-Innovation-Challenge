@@ -340,7 +340,7 @@ while machine_state == "scanning plate":
         next_state()
 
 userInput = input("Would you like to pick up Velcro (v) or Purple Lego Bricks (p)? ")
-while userInput in ["v", "p"]:
+while userInput in ["v", "p"]: # Any input beyond "v" or "p" will exit the program
     if userInput == "v":
         phase_pick_place(velcro)
     elif userInput == "p":
