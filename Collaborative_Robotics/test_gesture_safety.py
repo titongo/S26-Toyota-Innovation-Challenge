@@ -8,8 +8,13 @@ import sys
 
 import libteam21
 import mediapipe as mp
-import mediapipe.solutions.hands
-import mediapipe.solutions.drawing_utils
+
+try:
+    import mediapipe.solutions.hands as mp_hands
+    import mediapipe.solutions.drawing_utils as mp_drawing
+except ImportError:
+    import mediapipe.python.solutions.hands as mp_hands
+    import mediapipe.python.solutions.drawing_utils as mp_drawing
 
 print("=== STARTING STANDALONE GESTURE SAFETY TEST ===")
 
@@ -97,7 +102,7 @@ def safe_move_to_xyz(api, x, y, z):
         frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
         display_frame = frame.copy()
 
-        with mp.solutions.hands.Hands(
+        with mp_hands.Hands(
             static_image_mode=False,
             max_num_hands=2,
             min_detection_confidence=0.6,
@@ -108,8 +113,8 @@ def safe_move_to_xyz(api, x, y, z):
 
             if result.multi_hand_landmarks:
                 # Draw the full hand skeletal skeleton live on the GUI!
-                mp.solutions.drawing_utils.draw_landmarks(
-                    display_frame, result.multi_hand_landmarks[0], mp.solutions.hands.HAND_CONNECTIONS
+                mp_drawing.draw_landmarks(
+                    display_frame, result.multi_hand_landmarks[0], mp_hands.HAND_CONNECTIONS
                 )
                 
                 gesture = detect_gesture(result.multi_hand_landmarks[0])
@@ -141,8 +146,8 @@ def safe_move_to_xyz(api, x, y, z):
                         result2 = hands.process(cv2.cvtColor(frame2, cv2.COLOR_BGR2RGB))
 
                         if result2.multi_hand_landmarks:
-                            mp.solutions.drawing_utils.draw_landmarks(
-                                display_frame_paused, result2.multi_hand_landmarks[0], mp.solutions.hands.HAND_CONNECTIONS
+                            mp_drawing.draw_landmarks(
+                                display_frame_paused, result2.multi_hand_landmarks[0], mp_hands.HAND_CONNECTIONS
                             )
                             gesture2 = detect_gesture(result2.multi_hand_landmarks[0])
 
