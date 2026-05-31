@@ -45,8 +45,6 @@ HOUGH_PARAM2 = int(os.getenv("HOUGH_PARAM2", 20))
 
 machine_state = "scanning plate"
 
-# --- INITIALIZATION FOR CAMERA TRANSFORMATION ---
-# MAKE SURE THAT YOU HAVE RAN calibrateCamera.py FIRST TO GENERATE THE camera_params.npz FILE
 api = dType.load()
 
 cam_index, cam_backend = libteam21.autoSelectCamera()
@@ -57,7 +55,6 @@ data = np.load("./camera_params.npz")
 camera_matrix = data["camera_matrix"]
 dist_coeffs   = data["dist_coeffs"]
 
-# Compute undistort maps once
 ret, frame = cap.read()
 h, w = frame.shape[:2]
 new_K, roi = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (w,h), 1)
@@ -104,7 +101,8 @@ def safe_move_to_xyz(api, x, y, z):
                     if not result.multi_hand_landmarks:
                         print("[SAFETY] Hand removed. Resuming.")
                         break
-
+                
+                # 没用就删掉 ####
                 continue
 
         break
@@ -125,10 +123,6 @@ def next_state():
 
 
 
-# ---------------------------------------------------------
-# PHASE 1: DETECT Part Drop Zones (Plates)
-# this script assumes a metallic circular plate as the drop zone, but you can modify the detection logic to fit your specific use case.
-# ---------------------------------------------------------
 def phase_detect_plates():
     print("\n[PHASE 1] Scanning for drop zones. Waiting for stability...")
     print(f"[DEBUG] Using parameters - BilateralFilter({BILATERAL_DIAMETER}, {BILATERAL_SIGMA_COLOR}, {BILATERAL_SIGMA_SPACE}), HoughCircles(param1={HOUGH_PARAM1}, param2={HOUGH_PARAM2})")
@@ -141,7 +135,6 @@ def phase_detect_plates():
         display_frame = frame.copy()
         
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        # blurred = cv2.medianBlur(gray, 7)
         blurred = cv2.bilateralFilter(gray, BILATERAL_DIAMETER, BILATERAL_SIGMA_COLOR, BILATERAL_SIGMA_SPACE)
 
         x, y, w, h = [200, 100, 300, 200]
@@ -188,11 +181,6 @@ def phase_detect_plates():
   
 
 
-# ---------------------------------------------------------
-# PHASE 2: DETECT Red velcros to pick up (Red Blocks)
-# this script assumes the targets to be picked up are red blocks
-# be aware your target maynot be red, and they may not be rectangular! You will need to modify the detection logic to fit your specific use case.
-# ---------------------------------------------------------
 def phase_detect_targets():
     print("\n[PHASE 2] Scanning for targets. Waiting for stability...")
     stability_counter = 0
@@ -204,10 +192,8 @@ def phase_detect_targets():
             continue
         
         frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
-        # Create a display copy so drawings don't affect next frame's HSV detection
         display_frame = frame.copy()
         
-        # Red Tag Logic
         hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (3,3), 0), cv2.COLOR_BGR2HSV)
 
         mask = cv2.inRange(hsv, np.array([0,120,70]), np.array([10,255,255])) + \
@@ -224,12 +210,10 @@ def phase_detect_targets():
                     cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
                     rx, ry = pixel_to_robot(cx, cy, H_matrix)
                     current_list.append((rx, ry))
-                    # Draw on display_frame only
                     cv2.drawContours(display_frame, [cnt], -1, (0, 255, 0), 2)
                     
         cv2.waitKey(1)
 
-        # --- STABILITY LOGIC ---
         if len(current_list) != 0:
             if len(current_list) > 0 and len(current_list) == last_count:
                 stability_counter += 1
@@ -237,7 +221,6 @@ def phase_detect_targets():
                 stability_counter = 0
                 last_count = len(current_list)
 
-        # Visual Feedback
         progress = int((stability_counter / STABILITY_LIMIT) * 100)
         color = (0, 255, 0) if progress < 100 else (255, 255, 0)
         
@@ -245,11 +228,8 @@ def phase_detect_targets():
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
         cv2.imshow("Detection", display_frame)
         
-        # --- EXIT CONDITION ---
         if stability_counter >= STABILITY_LIMIT:
             print(f"[SUCCESS] Locked {len(current_list)} targets.")
-            #cv2.waitKey(500) # Brief pause so you can see the 100%
-    
             return current_list
 
 
@@ -262,7 +242,6 @@ def phase_execute_batch(api, pick_list, drop_list):
         print("missing targets, aborting")
         return False
     
-    # Match 1 part to 1 drop zone (uses the smaller count)
     batch_size = min(len(pick_list), len(drop_list))
     print(f"\n[PHASE 3] Executing batch of {batch_size} operations.")
 
