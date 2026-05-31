@@ -34,14 +34,6 @@ Z_PICK = -64 #what is the  height for the robot claw to successfully pick up the
 STABILITY_LIMIT = 60  #how many consecutive frames of stable detection before we "lock in" the positions and move to the next phase? (at 30fps, 60 frames is about 2 seconds)
 PIXEL_TOLERANCE = 10  #object can move at most this # of pixels to be considered stationary
 
-# --- PHASE 1 TUNING PARAMETERS (set via environment variables) ---
-# For shiny metal disk detection, use lower param1/param2 and aggressive bilateral filtering
-BILATERAL_DIAMETER = int(os.getenv("BILATERAL_D", 9))
-BILATERAL_SIGMA_COLOR = int(os.getenv("BILATERAL_SC", 40))
-BILATERAL_SIGMA_SPACE = int(os.getenv("BILATERAL_SS", 40))
-HOUGH_PARAM1 = int(os.getenv("HOUGH_PARAM1", 80))  # Lower for reflective surfaces
-HOUGH_PARAM2 = int(os.getenv("HOUGH_PARAM2", 20))  # Lower for reflective surfaces
-
 machine_state = "scanning plate"
 
 # --- INITIALIZATION FOR CAMERA TRANSFORMATION ---
@@ -51,14 +43,26 @@ api = dType.load()
 cam_index, cam_backend = libteam21.autoSelectCamera()
 cap = cv2.VideoCapture(cam_index, cam_backend)
 
+# If the auto-selected camera fails to read a frame, fall back to standard indices
+ret, frame = cap.read()
+if not ret or frame is None:
+    print(f"[WARNING] Auto-selected camera index {cam_index} failed to read. Falling back to index 2 (standard USB camera)...")
+    cap.release()
+    cap = cv2.VideoCapture(2) # Fall back to standard V4L2 index 2
+    ret, frame = cap.read()
+    if not ret or frame is None:
+        print("[WARNING] Index 2 failed. Falling back to index 0 (default webcam)...")
+        cap.release()
+        cap = cv2.VideoCapture(0)
+        ret, frame = cap.read()
+
 H_matrix = np.load("HomographyMatrix.npy")
 data = np.load("./camera_params.npz")
 camera_matrix = data["camera_matrix"]
 dist_coeffs   = data["dist_coeffs"]
 
 # Compute undistort maps once
-ret, frame = cap.read()
-h, w = frame.shape[:2]
+h, w = frame.shape[:2] if frame is not None else (480, 640)
 new_K, roi = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (w,h), 1)
 map1, map2 = cv2.initUndistortRectifyMap(camera_matrix, dist_coeffs, None, new_K, (w,h), cv2.CV_16SC2)
 
@@ -95,22 +99,44 @@ def phase_detect_plates():
     print("\n[PHASE 1] Scanning for drop zones (using EDCircles). Waiting for stability...")
     stability_counter = 0
     last_count = 0
+    frame_count = 0  # Counter to prevent flooding console with debug prints
+    
+    # Bilateral filter local tuning parameters for shiny metal disk detection
+    bilateral_diameter = 12
+    bilateral_sigma_color = 40
+    bilateral_sigma_space = 40
+    
+    # Sliding window coordinate history to filter out frame-by-frame jittering
+    coordinate_history = []
     
     # Initialize Edge Drawing object for EDCircles
     ed = cv2.ximgproc.createEdgeDrawing()
-    params = cv2.ximgproc.EdgeDrawing_Params()
+    
+    # Universal parameters initialization (works perfectly on both Windows and Linux)
+    params = ed.Params()
     params.EdgeDetectionOperator = cv2.ximgproc.EdgeDrawing_SOBEL
-    params.GradientThresholdValue = 20
-    params.AnchorThresholdValue = 8
+    params.GradientThresholdValue = 6  # Lower to capture softer/reflective metallic edges
+    params.AnchorThresholdValue = 2     # Lower to extract more edge anchors
+    params.NFAValidation = False        # Disable strict false alarm validation to detect shiny/broken discs
+    params.MinPathLength = 10
     ed.setParams(params)
     
     while True:
+        frame_count += 1
+        log_debug = (frame_count % 30 == 0) # Log every 30 frames (~once per second)
+        
+        if log_debug:
+            print("\n--- [EDCircles Debug Log] ---")
         ret, frame = cap.read()
         frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
         display_frame = frame.copy()
-        
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.bilateralFilter(gray, BILATERAL_DIAMETER, BILATERAL_SIGMA_COLOR, BILATERAL_SIGMA_SPACE)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))     
+
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        gaussian = cv2.GaussianBlur(hsv, (7, 7), 1.5)      # or cv2.medianBlur(img, 5)
+
+        blurred = cv2.bilateralFilter(gaussian, bilateral_diameter, bilateral_sigma_color, bilateral_sigma_space)
+        cv2.imshow("Blurred (Debug)", blurred)
         # set region of interest
         x, y, w, h = [200, 100, 300, 200]  # adjust these values
 
@@ -121,29 +147,62 @@ def phase_detect_plates():
         # Run EDCircles on the ROI
         ed.detectEdges(roi)
         ellipses = ed.detectEllipses()
+        
+        # Show debug edge map to see live edge segment extraction
+        edge_img = ed.getEdgeImage()
+        cv2.imshow("ED Edge Map (Debug)", edge_img)
 
         current_list = []
         if ellipses is not None:
-            for ellipse in ellipses[0]:
-                # If element index 2 > 0, it was detected as a pure circle by EDCircles
-                if ellipse[2] > 0:
+            if log_debug:
+                print(f"Total shapes detected by EDCircles: {len(ellipses[0])}")
+                
+            for idx, ellipse in enumerate(ellipses[0]):
+                is_pure_circle = ellipse[2] > 0
+                
+                if is_pure_circle:
                     cx_roi, cy_roi, r = int(ellipse[0]), int(ellipse[1]), int(ellipse[2])
+                    if log_debug:
+                        print(f"  [{idx}] Pure Circle at ({cx_roi}, {cy_roi}) with radius {r}px")
                 else:
-                    # Else check if the ellipse is highly circular (semi-major / semi-minor < 1.2)
                     r_major, r_minor = ellipse[3], ellipse[4]
-                    if r_minor > 0 and (r_major / r_minor) < 1.2:
-                        cx_roi, cy_roi, r = int(ellipse[0]), int(ellipse[1]), int((r_major + r_minor) / 2)
-                    else:
+                    ratio = r_major / r_minor if r_minor > 0 else 0
+                    cx_roi, cy_roi, r = int(ellipse[0]), int(ellipse[1]), int((r_major + r_minor) / 2)
+                    
+                    if log_debug:
+                        print(f"  [{idx}] Ellipse at ({cx_roi}, {cy_roi}): major={r_major:.1f}px, minor={r_minor:.1f}px, ratio={ratio:.2f}")
+                    
+                    if r_minor <= 0 or ratio >= 1.2:
+                        if log_debug:
+                            print(f"      -> REJECTED: Not circular enough (ratio {ratio:.2f} >= 1.2)")
                         continue
                 
-                # Filter circles in the expected radius range (25 to 55 pixels)
-                if 25 <= r <= 55:
+                # Filter circles in the expected radius range (18 to 55 pixels)
+                if 18 <= r <= 55:
                     full_x = cx_roi + x      # Add ROI x offset (200)
+                    
                     full_y = cy_roi + y      # Add ROI y offset (100)
                     
                     cv2.circle(display_frame, (full_x, full_y), r, (0, 255, 0), 2)
                     rx, ry = pixel_to_robot(full_x, full_y, H_matrix)
-                    current_list.append((rx, ry))
+                    
+                    # Apply moving average filter to smooth coordinates and prevent jitter
+                    coordinate_history.append((rx, ry))
+                    if len(coordinate_history) > 6:
+                        coordinate_history.pop(0)  # Keep the last 6 frames of history
+                    
+                    smooth_rx = sum(p[0] for p in coordinate_history) / len(coordinate_history)
+                    smooth_ry = sum(p[1] for p in coordinate_history) / len(coordinate_history)
+                    
+                    current_list.append((smooth_rx, smooth_ry))
+                    if log_debug:
+                        print(f"      -> ACCEPTED: Radius {r}px in range [18, 55], smoothed robot pos=({smooth_rx:.1f}, {smooth_ry:.1f})")
+                else:
+                    if log_debug:
+                        print(f"      -> REJECTED: Radius {r}px is outside expected range [18, 55]")
+        else:
+            if log_debug:
+                print("No shapes detected by Edge Drawing algorithm. (Tip: Try adjusting lighting, focus, or lowering GradientThresholdValue)")
 
         # --- AUTO-LOCK LOGIC ---
         if len(current_list) > 0 and len(current_list) == last_count:
@@ -190,7 +249,7 @@ def phase_detect_targets():
 
         current_list = []
         for cnt in contours:
-            if cv2.contourArea(cnt) > 800:
+            if cv2.contourArea(cnt) > 50:
                 M = cv2.moments(cnt)
                 if M["m00"] != 0:
                     cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
