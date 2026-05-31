@@ -25,6 +25,7 @@ import time
 import os
 
 import libteam21
+import mediapipe as mp
 
 
 """CONSTANTS"""
@@ -96,6 +97,71 @@ def boost_saturation(frame, gain=SATURATION_GAIN):
     h, s, v = cv2.split(hsv)
     s = np.clip(s.astype(np.float32) * gain, 0, 255).astype(np.uint8)
     return cv2.cvtColor(cv2.merge((h, s, v)), cv2.COLOR_HSV2BGR)
+
+
+# ---------------------------------------------------------
+# HAND SAFETY DETECTION
+# ---------------------------------------------------------
+
+HAND_STOP = "HAND_STOP"  # Sentinel returned by any phase when a hand interrupts it
+
+_mp_hands = mp.solutions.hands
+_hands_detector = _mp_hands.Hands(
+    static_image_mode=False,
+    max_num_hands=2,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5,
+)
+
+def is_hand_in_focus_area(frame):
+    """Returns True if any detected hand landmark falls inside the focus_area rectangle."""
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = _hands_detector.process(rgb)
+    if not results.multi_hand_landmarks:
+        return False
+    fh, fw = frame.shape[:2]
+    for hand_landmarks in results.multi_hand_landmarks:
+        for lm in hand_landmarks.landmark:
+            px = int(lm.x * fw)
+            py = int(lm.y * fh)
+            if x_focus <= px <= x_focus + w_focus and y_focus <= py <= y_focus + h_focus:
+                return True
+    return False
+
+def wait_for_hand_clear():
+    """Blocks with a red warning overlay until no hand is detected in the focus area."""
+    print("[SAFETY] Hand detected in focus area — operation stopped.")
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
+        if not is_hand_in_focus_area(frame):
+            print("[SAFETY] Hand removed — restarting from plate scan.")
+            return
+        disp = frame.copy()
+        cv2.rectangle(disp, (x_focus, y_focus), (x_focus + w_focus, y_focus + h_focus), (0, 0, 255), 3)
+        cv2.putText(disp, "!! HAND DETECTED - STOPPED !!", (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 3)
+        cv2.imshow("Detection", disp)
+        cv2.waitKey(1)
+
+def _safe_move(x, y, z, angle=0):
+    """Reads a camera frame to check for a hand before issuing a robot move.
+    If a hand is present: opens the gripper (drops held part safely), then waits
+    for the hand to clear.  Returns HAND_STOP so the caller can propagate the
+    restart, otherwise executes the move and returns None."""
+    ret, frame = cap.read()
+    if ret:
+        frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
+        if is_hand_in_focus_area(frame):
+            dobotArm.open_gripper(api)  # Release any held part before stopping
+            wait_for_hand_clear()
+            return HAND_STOP
+    dobotArm.move_to_xyz(api, x, y, z, angle)
+    return None
+
+
 # State machine logic to control the flow of the program through the three phases: scanning for plates, scanning for targets, and executing pick/place operations.
 # THIS STATE MACHINE IS TOO SIMPLE. Can you think of logics that should change the robot's sequnece of actions?
 # Ex: what if the robot fails to pick up a target? should it retry? should it go back to scanning for targets in case the target was moved? what if a new plate is added during the pick/place phase?
@@ -152,9 +218,12 @@ def phase_detect_plates():
             print("\n--- [EDCircles Debug Log] ---")
         ret, frame = cap.read()
         frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
+        if is_hand_in_focus_area(frame):
+            wait_for_hand_clear()
+            return HAND_STOP
         frame = libteam21.boost_saturation(frame)
         display_frame = frame.copy()
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))     
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         gaussian = cv2.GaussianBlur(hsv, (7, 7), 1.5)      # or cv2.medianBlur(img, 5)
@@ -252,8 +321,11 @@ def phase_detect_targets(targetPart: Part):
     while True:
         ret, frame = cap.read()
         if not ret: continue
-        
+
         frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
+        if is_hand_in_focus_area(frame):
+            wait_for_hand_clear()
+            return HAND_STOP
         frame = libteam21.boost_saturation(frame)
         # Create a display copy so drawings don't affect next frame's HSV detection
         display_frame = frame.copy()
@@ -336,13 +408,12 @@ def phase_detect_targets(targetPart: Part):
 # Do you need collision avoidance? Think about if the robot gripper accidentally hits the plate or other parts on the way to the target, what would happen? How would you modify the robot's movement logic to avoid collisions?
 # ---------------------------------------------------------
 def phase_execute_batch(api, pick_list, drop_list):
-    cv2.VideoCapture(0)
     time.sleep(0.5)
-    
+
     if len(pick_list) == 0 or len(drop_list) == 0:
         print("missing targets, aborting")
         return False
-    
+
     # Match 1 part to 1 drop zone (uses the smaller count)
     batch_size = min(len(pick_list), len(drop_list))
     print(f"\n[PHASE 3] Executing batch of {batch_size} operations.")
@@ -354,19 +425,26 @@ def phase_execute_batch(api, pick_list, drop_list):
         print(f"Task {i+1}: Moving {pick_x, pick_y} to {drop_x, drop_y}, rotated to angle {pick_angle}")
 
         # --- PICK SEQUENCE ---
-        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, pick_angle)
-        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK, pick_angle)
-        #optional alternate function call method to include a rotation of the gripper angle
-        #dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, 45) 
+        result = _safe_move(pick_x, pick_y, Z_SAFE, pick_angle)
+        if result == HAND_STOP: return HAND_STOP
+
+        result = _safe_move(pick_x, pick_y, Z_PICK, pick_angle)
+        if result == HAND_STOP: return HAND_STOP
 
         dobotArm.close_gripper(api)
-        dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, pick_angle)
+
+        result = _safe_move(pick_x, pick_y, Z_SAFE, pick_angle)
+        if result == HAND_STOP: return HAND_STOP
 
         # --- PLACE SEQUENCE ---
-        dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
+        result = _safe_move(drop_x, drop_y, Z_SAFE)
+        if result == HAND_STOP: return HAND_STOP
+
         dobotArm.open_gripper(api)
         dobotArm.stop_pump(api)
-        dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
+
+        result = _safe_move(drop_x, drop_y, Z_SAFE)
+        if result == HAND_STOP: return HAND_STOP
 
     # irl, it is ok for 1 dish to contain multiple parts
     # if len(pick_list) > len(drop_list):
@@ -389,22 +467,24 @@ def phase_execute_batch(api, pick_list, drop_list):
     return True
  
 def phase_pick_place(target: Part):
+    global machine_state
     print("\n[PHASE 3] Executing pick/place operations.")
-    # This function can be used if you want to execute pick/place one by one with more complex logic in between, rather than in batches.
     while machine_state == "scanning target":
-    
         pick_target = phase_detect_targets(target)
+        if pick_target == HAND_STOP:
+            machine_state = "scanning plate"
+            return HAND_STOP
         if pick_target is not None:
             next_state()
-    cap.release()
     while machine_state == "pick place":
         completed = phase_execute_batch(api, pick_target, drop_zone)
+        if completed == HAND_STOP:
+            machine_state = "scanning plate"
+            return HAND_STOP
         if completed:
             next_state()
-        else: break
-
-        pass
-    cap.open(cam_index, cam_backend)
+        else:
+            break
 
 # ---------------------------------------------------------
 # MAIN EXECUTION
@@ -427,15 +507,31 @@ purpleLegoBrick = Part(
         minContourArea=20
     )
 
-while machine_state == "scanning plate":
-    drop_zone = phase_detect_plates()
-    if drop_zone is not None:
-        next_state()
+while True:
+    machine_state = "scanning plate"
 
-phase_pick_place(velcro)
-machine_state = "scanning target"
-phase_pick_place(purpleLegoBrick)
+    # PHASE 1: scan for drop zones; restart if hand interrupts
+    hand_interrupted = False
+    while machine_state == "scanning plate":
+        drop_zone = phase_detect_plates()
+        if drop_zone == HAND_STOP:
+            hand_interrupted = True
+            break
+        if drop_zone is not None:
+            next_state()
+    if hand_interrupted:
+        continue
 
+    # PHASE 2+3: detect and pick velcro targets; restart on hand
+    if phase_pick_place(velcro) == HAND_STOP:
+        continue
+
+    # PHASE 2+3: detect and pick purple LEGO bricks; restart on hand
+    machine_state = "scanning target"
+    if phase_pick_place(purpleLegoBrick) == HAND_STOP:
+        continue
+
+    break  # All operations completed successfully
 
 cap.release()
 cv2.destroyAllWindows()
