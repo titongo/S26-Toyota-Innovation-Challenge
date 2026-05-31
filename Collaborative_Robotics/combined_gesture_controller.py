@@ -165,6 +165,7 @@ try:
         status_color = (0, 255, 0)
         pixel_x, pixel_y = 0, 0
         index_tip = None
+        span = 70.0
 
         if result.multi_hand_landmarks:
             hand_landmarks = result.multi_hand_landmarks[0]
@@ -181,6 +182,13 @@ try:
             pixel_y = int(index_tip.y * h)
             cv2.circle(display_frame, (pixel_x, pixel_y), 10, (255, 255, 0), -1)
 
+            # Compute physical hand distance (depth) from table using Wrist (0) and Middle Knuckle (9) pixel span
+            wrist = hand_landmarks.landmark[0]
+            knuckle = hand_landmarks.landmark[9]
+            wrist_px = (wrist.x * w, wrist.y * h)
+            knuckle_px = (knuckle.x * w, knuckle.y * h)
+            span = np.sqrt((wrist_px[0] - knuckle_px[0])**2 + (wrist_px[1] - knuckle_px[1])**2)
+
         # --- MODE TRANSITION STATE MACHINE ---
         if gesture == "pinch" and result.multi_hand_landmarks and index_tip is not None:
             # Direct Teleoperation Override Mode
@@ -194,7 +202,11 @@ try:
 
             # Translate index tip pixel to robot world coordinates
             target_rx, target_ry = pixel_to_robot(pixel_x, pixel_y, H_matrix)
-            target_rz = Z_MIN + (1.0 - index_tip.y) * (Z_MAX - Z_MIN)
+            
+            # Map the hand's pixel span (proximity to camera) to physical Z distance from the table!
+            SPAN_MIN, SPAN_MAX = 50.0, 130.0
+            clamped_span = max(SPAN_MIN, min(SPAN_MAX, span))
+            target_rz = Z_MIN + ((clamped_span - SPAN_MIN) / (SPAN_MAX - SPAN_MIN)) * (Z_MAX - Z_MIN)
 
             # Enforce safety boundaries
             target_rx = max(X_MIN, min(X_MAX, target_rx))

@@ -164,6 +164,13 @@ try:
                 # Draw a target circle on the index finger
                 cv2.circle(display_frame, (pixel_x, pixel_y), 10, (255, 255, 0), -1)
                 
+                # Compute physical hand distance (depth) from table using Wrist (0) and Middle Knuckle (9) pixel span
+                wrist = hand_landmarks.landmark[0]
+                knuckle = hand_landmarks.landmark[9]
+                wrist_px = (wrist.x * w, wrist.y * h)
+                knuckle_px = (knuckle.x * w, knuckle.y * h)
+                span = np.sqrt((wrist_px[0] - knuckle_px[0])**2 + (wrist_px[1] - knuckle_px[1])**2)
+
                 if gesture == "open_palm":
                     status_text = "OPEN PALM -> Gripper OPENED"
                     status_color = (0, 255, 0)
@@ -182,9 +189,10 @@ try:
                     # Convert index finger tip pixel to robot world coordinate
                     target_rx, target_ry = pixel_to_robot(pixel_x, pixel_y, H_matrix)
                     
-                    # Also map index finger Y coordinate to robot Z height dynamically
-                    # Lowering hand (high screen Y) lowers Z; raising hand (low screen Y) raises Z
-                    target_rz = Z_MIN + (1.0 - index_tip.y) * (Z_MAX - Z_MIN)
+                    # Map the hand's pixel span (proximity to camera) to physical Z distance from the table!
+                    SPAN_MIN, SPAN_MAX = 50.0, 130.0
+                    clamped_span = max(SPAN_MIN, min(SPAN_MAX, span))
+                    target_rz = Z_MIN + ((clamped_span - SPAN_MIN) / (SPAN_MAX - SPAN_MIN)) * (Z_MAX - Z_MIN)
                     
                     # Apply safety workspace bounding box limits
                     target_rx = max(X_MIN, min(X_MAX, target_rx))
@@ -203,9 +211,9 @@ try:
                     # Draw movement vector lines on GUI
                     cv2.putText(display_frame, f"Robot Pos: ({smooth_rx:.0f}, {smooth_ry:.0f}, {current_z:.0f})", 
                                 (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-                else:
-                    status_text = f"Neutral Gesture (Hand detected)"
-                    status_color = (128, 255, 128)
+            else:
+                status_text = f"Neutral Gesture (No Hand)"
+                status_color = (128, 255, 128)
             
             # Overlay HUD Info on GUI
             cv2.putText(display_frame, f"GESTURE: {status_text}", (20, 40), 
