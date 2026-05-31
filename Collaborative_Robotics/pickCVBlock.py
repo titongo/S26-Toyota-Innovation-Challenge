@@ -339,9 +339,14 @@ while machine_state == "scanning plate":
     if drop_zone is not None:
         next_state()
 
-phase_pick_place(velcro)
-machine_state = "scanning target"
-phase_pick_place(purpleLegoBrick)
+userInput = input("Would you like to pick up Velcro (v) or Purple Lego Bricks (p)? ")
+while userInput in ["v", "p"]:
+    if userInput == "v":
+        phase_pick_place(velcro)
+    elif userInput == "p":
+        phase_pick_place(purpleLegoBrick)
+    machine_state = "scanning target"
+    userInput = input("Would you like to pick up Velcro (v) or Purple Lego Bricks (p)? ")
 
 
 cap.release()
