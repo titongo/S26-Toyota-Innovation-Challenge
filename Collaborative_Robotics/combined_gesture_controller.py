@@ -71,42 +71,7 @@ dist_coeffs   = data["dist_coeffs"]
 
 h, w = frame.shape[:2]
 new_K, roi = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (w,h), 1)
-map1, map2 = cv2.initUndistortRectifyMap(camera_matrix, dist_coeffs, None, new_K, (w,h), cv2.CV_16SC2)
-
-# Initialize a single global MediaPipe Hands tracker to prevent massive CPU re-initialization lag
-hands = mp_hands.Hands(
-    static_image_mode=False,
-    max_num_hands=1,
-    min_detection_confidence=0.7,
-    min_tracking_confidence=0.7
-)
-
-# --- ROBOT INITIALIZATION ---
-print("3. Initializing Robot and Homing...")
-dobotArm.initialize_robot(api)
-dobotArm.open_gripper(api)
-dobotArm.stop_pump(api)
-print("[SUCCESS] Robot is ready.")
-
-
-def pixel_to_robot(u, v, H):
-    p = np.array([u, v, 1])
-    xy = H @ p
-    xy /= xy[2]
-    return xy[0], xy[1]
-
-
-def detect_gesture(hand_landmarks):
-    lm = hand_landmarks.landmark
-    fingers_up = 0
-    finger_tips = [8, 12, 16, 20]
-    finger_pips = [6, 10, 14, 18]
-
-    for tip, pip in zip(finger_tips, finger_pips):
-        if lm[tip].y < lm[pip].y:
-            fingers_up += 1
-
-    thumb_index_dist = ((lm[4].x - lm[8].x) ** 2 + (lm[4].y - lm[8].y) ** 2) ** 0.5
+].y) ** 2) ** 0.5
 
     if fingers_up >= 4:
         return "open_palm"
