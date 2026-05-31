@@ -50,9 +50,23 @@ if frame is None:
     print("Error: Could not open any camera device!")
     sys.exit(1)
 
-# Camera transformation parameters
-H_matrix = np.load("HomographyMatrix.npy")
-data = np.load("./camera_params.npz")
+# Camera transformation parameters safely loaded from either ./ or ../
+if os.path.exists("HomographyMatrix.npy"):
+    H_matrix = np.load("HomographyMatrix.npy")
+elif os.path.exists("../HomographyMatrix.npy"):
+    H_matrix = np.load("../HomographyMatrix.npy")
+else:
+    print("Error: HomographyMatrix.npy not found!")
+    sys.exit(1)
+
+if os.path.exists("camera_params.npz"):
+    data = np.load("camera_params.npz")
+elif os.path.exists("../camera_params.npz"):
+    data = np.load("../camera_params.npz")
+else:
+    print("Error: camera_params.npz not found!")
+    sys.exit(1)
+
 camera_matrix = data["camera_matrix"]
 dist_coeffs   = data["dist_coeffs"]
 
