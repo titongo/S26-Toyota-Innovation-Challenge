@@ -27,6 +27,13 @@ import os
 import libteam21
 import mediapipe as mp
 
+try:
+    import mediapipe.solutions.hands as mp_hands
+    import mediapipe.solutions.drawing_utils as mp_drawing
+except ImportError:
+    import mediapipe.python.solutions.hands as mp_hands
+    import mediapipe.python.solutions.drawing_utils as mp_drawing
+
 
 """CONSTANTS"""
 
@@ -108,7 +115,7 @@ def safe_move_to_xyz(api, x, y, z):
 
         frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
 
-        with mp.solutions.hands.Hands(
+        with mp_hands.Hands(
             static_image_mode=False,
             max_num_hands=2,
             min_detection_confidence=0.6,
