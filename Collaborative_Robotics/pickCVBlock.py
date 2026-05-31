@@ -442,9 +442,6 @@ def phase_detect_targets(targetPart: Part):
 # This function assumes 1 drop zone only has 1 part, and executes the pick/place operations in batches.
 # ---------------------------------------------------------
 def phase_execute_batch(api, pick_list, drop_list):
-    cv2.VideoCapture(0)
-    time.sleep(0.5)
-    
     if len(pick_list) == 0 or len(drop_list) == 0:
         print("missing targets, aborting")
         return False
