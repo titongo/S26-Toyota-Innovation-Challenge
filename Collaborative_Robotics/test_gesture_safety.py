@@ -81,10 +81,15 @@ def detect_gesture(hand_landmarks):
 
 
 def safe_move_to_xyz(api, x, y, z):
-    print(f"Moving to: ({x}, {y}, {z}) with gesture listening active...")
-    while True:
+    print(f"Moving to: ({x}, {y}, {z}) with real-time gesture tracking...")
+    
+    # Start the immediate movement command
+    execCmd = dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJXYZMode, x, y, z, 0, isQueued=0)[0]
+    
+    # Continuous camera read and hand tracking loop while the robot is moving
+    while execCmd > dType.GetQueuedCmdCurrentIndex(api)[0]:
         ret, frame = cap.read()
-        if not ret:
+        if not ret or frame is None:
             continue
 
         frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
@@ -100,68 +105,56 @@ def safe_move_to_xyz(api, x, y, z):
             result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
             if result.multi_hand_landmarks:
-                gesture = detect_gesture(result.multi_hand_landmarks[0])
-                
-                # Draw landmarks on display frame
+                # Draw the full hand skeletal skeleton live on the GUI!
                 mp.solutions.drawing_utils.draw_landmarks(
                     display_frame, result.multi_hand_landmarks[0], mp.solutions.hands.HAND_CONNECTIONS
                 )
+                
+                gesture = detect_gesture(result.multi_hand_landmarks[0])
 
                 if gesture == "pinch_open":
                     print("[GESTURE] Thumb-index open detected. Opening gripper.")
                     dobotArm.open_gripper(api)
-                    cv2.putText(display_frame, "OPEN GRIPPER", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-                    cv2.imshow("Gesture Safety Window", display_frame)
-                    cv2.waitKey(1)
-                    continue
-
                 elif gesture == "pinch_close":
                     print("[GESTURE] Thumb-index close detected. Closing gripper.")
                     dobotArm.close_gripper(api)
-                    cv2.putText(display_frame, "CLOSE GRIPPER", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-                    cv2.imshow("Gesture Safety Window", display_frame)
-                    cv2.waitKey(1)
-                    continue
-
                 elif gesture == "open_palm":
-                    print("[SAFETY] Open palm detected. Robot paused.")
-                    cv2.putText(display_frame, "ROBOT PAUSED - OPEN PALM", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-                    cv2.imshow("Gesture Safety Window", display_frame)
-                    cv2.waitKey(1)
-
-                    # Move robot to safe height
+                    print("[SAFETY] Open palm detected. Pausing robot immediately!")
+                    
+                    # Force stop execution of the current movement command
+                    dType.SetQueuedCmdForceStopExec(api)
+                    
+                    # Raise the arm to safe height
                     dobotArm.move_to_xyz(api, x, y, Z_SAFE)
 
-                    # Pause loop until safe fist gesture is shown
+                    # Block in this pause loop until "fist" is shown to resume
                     while True:
-                        ret, frame = cap.read()
-                        if not ret:
+                        ret2, frame2 = cap.read()
+                        if not ret2:
                             continue
 
-                        frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
-                        display_frame_paused = frame.copy()
+                        frame2 = cv2.remap(frame2, map1, map2, cv2.INTER_LINEAR)
+                        display_frame_paused = frame2.copy()
                         
-                        result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                        result2 = hands.process(cv2.cvtColor(frame2, cv2.COLOR_BGR2RGB))
 
-                        if result.multi_hand_landmarks:
+                        if result2.multi_hand_landmarks:
                             mp.solutions.drawing_utils.draw_landmarks(
-                                display_frame_paused, result.multi_hand_landmarks[0], mp.solutions.hands.HAND_CONNECTIONS
+                                display_frame_paused, result2.multi_hand_landmarks[0], mp.solutions.hands.HAND_CONNECTIONS
                             )
-                            gesture = detect_gesture(result.multi_hand_landmarks[0])
+                            gesture2 = detect_gesture(result2.multi_hand_landmarks[0])
 
-                            if gesture == "pinch_open":
+                            if gesture2 == "pinch_open":
                                 print("[GESTURE] Thumb-index open detected. Opening gripper.")
                                 dobotArm.open_gripper(api)
-
-                            elif gesture == "pinch_close":
+                            elif gesture2 == "pinch_close":
                                 print("[GESTURE] Thumb-index close detected. Closing gripper.")
                                 dobotArm.close_gripper(api)
-
-                            elif gesture == "fist":
+                            elif gesture2 == "fist":
                                 print("[SAFETY] Fist detected. Resuming movement.")
                                 break
                             
-                            cv2.putText(display_frame_paused, f"PAUSED - SHOW FIST TO RESUME (Current: {gesture})", 
+                            cv2.putText(display_frame_paused, f"PAUSED - SHOW FIST TO RESUME (Current: {gesture2})", 
                                         (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                         else:
                             cv2.putText(display_frame_paused, "PAUSED - SHOW FIST TO RESUME (No Hand)", 
@@ -170,22 +163,22 @@ def safe_move_to_xyz(api, x, y, z):
                         cv2.imshow("Gesture Safety Window", display_frame_paused)
                         cv2.waitKey(1)
 
-                    continue
+                    # Resume the queue execution and restart the move command
+                    print("Resuming movement...")
+                    dType.SetQueuedCmdStartExec(api)
+                    execCmd = dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJXYZMode, x, y, z, 0, isQueued=0)[0]
 
         cv2.putText(display_frame, "ROBOT MOVING...", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
         cv2.imshow("Gesture Safety Window", display_frame)
         cv2.waitKey(1)
-        break
-
-    dobotArm.move_to_xyz(api, x, y, z)
 
 
 # --- MAIN TEST LOOP ---
 print("\n=== STARTING MOTION PATTERN ===")
 print("The robot will now move back and forth between two points indefinitely.")
 print("Place your hand in front of the camera to test:")
-print("  - SHOW OPEN PALM: Stops the robot and raises the arm to safety height.")
-# print("  - SHOW FIST (after pause): Resumes the robot movement.")
+print("  - SHOW OPEN PALM: Stops the robot instantly and raises the arm to safety height.")
+print("  - SHOW FIST (after pause): Resumes the robot movement.")
 print("  - PINCH CLOSE / PINCH OPEN: Manually controls the gripper.")
 print("Press Ctrl+C in the terminal to exit.")
 
