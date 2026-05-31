@@ -490,7 +490,7 @@ def phase_pick_place(target: Part):
             
     # --- PHASE 3 ACTIVATION LOCK ---
     # Since they want Phase 3 to execute immediately on the main pipeline now, we continue cleanly!
-    cap.release()
+    # Kept camera cap open to ensure safe_move_to_xyz can read frames and track hands during movement transits!
     
     while machine_state == "pick place":
         completed = phase_execute_batch(api, pick_target, drop_zone)
@@ -498,7 +498,6 @@ def phase_pick_place(target: Part):
             next_state()
         else: break
         pass
-    cap.open(cam_index, cam_backend)
  
 
 # ---------------------------------------------------------
