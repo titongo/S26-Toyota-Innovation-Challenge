@@ -16,13 +16,6 @@
 #dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE, rHead): moves the robot to the specified (x, y, z) coordinates with a specified rotation for the end effector (rHead). Z_SAFE is a predefined constant that ensures the robot maintains a safe height to avoid collisions when moving horizontally.
 
 
-# This code is a simplified implementation of a collaborative robotics system that detects plates and targets using computer vision, 
-# and then commands a Dobot robotic arm to pick and place objects accordingly.
-
-#This code is a simplified implementation of a collaborative robotics system that detects plates and targets using computer vision, 
-#and then commands a Dobot robotic arm to pick and place objects accordingly. The system operates in three phases: scanning for plates, 
-#scanning for targets, and executing the pick/place operations. 
-#Stability checks are implemented to ensure reliable detection before proceeding to the next phase.
 
 import dobotArm
 import lib.DobotDllType as dType
@@ -37,34 +30,42 @@ import mediapipe as mp
 
 """CONSTANTS"""
 
-Z_SAFE = 40
-Z_PICK = -64
-STABILITY_LIMIT = 60
-PIXEL_TOLERANCE = 10
-
-BILATERAL_DIAMETER = int(os.getenv("BILATERAL_D", 9))
-BILATERAL_SIGMA_COLOR = int(os.getenv("BILATERAL_SC", 40))
-BILATERAL_SIGMA_SPACE = int(os.getenv("BILATERAL_SS", 40))
-HOUGH_PARAM1 = int(os.getenv("HOUGH_PARAM1", 80))
-HOUGH_PARAM2 = int(os.getenv("HOUGH_PARAM2", 20))
+Z_SAFE = 40 #what is the clearance distance for the robot arm to avoid collisions when moving horizontally?
+Z_PICK = -64 #what is the  height for the robot claw to successfully pick up the target?
+STABILITY_LIMIT = 60  #how many consecutive frames of stable detection before we "lock in" the positions and move to the next phase? (at 30fps, 60 frames is about 2 seconds)
+PIXEL_TOLERANCE = 10  #object can move at most this # of pixels to be considered stationary
 
 machine_state = "scanning plate"
 
+# --- INITIALIZATION FOR CAMERA TRANSFORMATION ---
+# MAKE SURE THAT YOU HAVE RAN calibrateCamera.py FIRST TO GENERATE THE camera_params.npz FILE
 api = dType.load()
 
 cam_index, cam_backend = libteam21.autoSelectCamera()
 cap = cv2.VideoCapture(cam_index, cam_backend)
+
+# If the auto-selected camera fails to read a frame, fall back to standard indices
+ret, frame = cap.read()
+if not ret or frame is None:
+    print(f"[WARNING] Auto-selected camera index {cam_index} failed to read. Falling back to index 2 (standard USB camera)...")
+    cap.release()
+    cap = cv2.VideoCapture(2) # Fall back to standard V4L2 index 2
+    ret, frame = cap.read()
+    if not ret or frame is None:
+        print("[WARNING] Index 2 failed. Falling back to index 0 (default webcam)...")
+        cap.release()
+        cap = cv2.VideoCapture(0)
+        ret, frame = cap.read()
 
 H_matrix = np.load("HomographyMatrix.npy")
 data = np.load("./camera_params.npz")
 camera_matrix = data["camera_matrix"]
 dist_coeffs   = data["dist_coeffs"]
 
-ret, frame = cap.read()
-h, w = frame.shape[:2]
+# Compute undistort maps once
+h, w = frame.shape[:2] if frame is not None else (480, 640)
 new_K, roi = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (w,h), 1)
 map1, map2 = cv2.initUndistortRectifyMap(camera_matrix, dist_coeffs, None, new_K, (w,h), cv2.CV_16SC2)
-
 
 def pixel_to_robot(u, v, H):
     p = np.array([u, v, 1])
@@ -72,12 +73,6 @@ def pixel_to_robot(u, v, H):
     xy /= xy[2]
     return xy[0], xy[1]
 
-
-####################################################################################################
-####################################################################################################
-############################### MODIFIED PART START: HAND GESTURE ##################################
-####################################################################################################
-####################################################################################################
 
 def detect_gesture(hand_landmarks):
     lm = hand_landmarks.landmark
@@ -104,12 +99,6 @@ def detect_gesture(hand_landmarks):
     else:
         return "other"
 
-####################################################################################################
-####################################################################################################
-################################ MODIFIED PART END: HAND GESTURE ###################################
-####################################################################################################
-####################################################################################################
-
 
 def safe_move_to_xyz(api, x, y, z):
     while True:
@@ -127,12 +116,6 @@ def safe_move_to_xyz(api, x, y, z):
         ) as hands:
 
             result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-
-            ####################################################################################################
-            ####################################################################################################
-            ########################### MODIFIED PART START: GESTURE CONTROL LOGIC #############################
-            ####################################################################################################
-            ####################################################################################################
 
             if result.multi_hand_landmarks:
                 gesture = detect_gesture(result.multi_hand_landmarks[0])
@@ -177,16 +160,15 @@ def safe_move_to_xyz(api, x, y, z):
 
                     continue
 
-            ####################################################################################################
-            ####################################################################################################
-            ############################ MODIFIED PART END: GESTURE CONTROL LOGIC ##############################
-            ####################################################################################################
-            ####################################################################################################
-
         break
 
     dobotArm.move_to_xyz(api, x, y, z)
 
+
+# State machine logic to control the flow of the program through the three phases: scanning for plates, scanning for targets, and executing pick/place operations.
+# THIS STATE MACHINE IS TOO SIMPLE. Can you think of logics that should change the robot's sequnece of actions?
+# Ex: what if the robot fails to pick up a target? should it retry? should it go back to scanning for targets in case the target was moved? what if a new plate is added during the pick/place phase?
+# What if a human's hand is in sight during pick/place phase? (safety first!)
 
 def next_state():
     global machine_state
@@ -201,47 +183,120 @@ def next_state():
 
 
 
+# ---------------------------------------------------------
+# PHASE 1: DETECT Part Drop Zones (Plates)
+# this script assumes a metallic circular plate as the drop zone, but you can modify the detection logic to fit your specific use case.
+# ---------------------------------------------------------
 def phase_detect_plates():
-    print("\n[PHASE 1] Scanning for drop zones. Waiting for stability...")
-    print(f"[DEBUG] Using parameters - BilateralFilter({BILATERAL_DIAMETER}, {BILATERAL_SIGMA_COLOR}, {BILATERAL_SIGMA_SPACE}), HoughCircles(param1={HOUGH_PARAM1}, param2={HOUGH_PARAM2})")
+    print("\n[PHASE 1] Scanning for drop zones (using EDCircles). Waiting for stability...")
     stability_counter = 0
     last_count = 0
+    frame_count = 0  # Counter to prevent flooding console with debug prints
+    
+    # Bilateral filter local tuning parameters for shiny metal disk detection
+    bilateral_diameter = 12
+    bilateral_sigma_color = 40
+    bilateral_sigma_space = 40
+    
+    # Sliding window coordinate history to filter out frame-by-frame jittering
+    coordinate_history = []
+    
+    # Initialize Edge Drawing object for EDCircles
+    ed = cv2.ximgproc.createEdgeDrawing()
+    
+    # Universal parameters initialization (works perfectly on both Windows and Linux)
+    params = ed.Params()
+    params.EdgeDetectionOperator = cv2.ximgproc.EdgeDrawing_SOBEL
+    params.GradientThresholdValue = 6  # Lower to capture softer/reflective metallic edges
+    params.AnchorThresholdValue = 2     # Lower to extract more edge anchors
+    params.NFAValidation = False        # Disable strict false alarm validation to detect shiny/broken discs
+    params.MinPathLength = 10
+    ed.setParams(params)
     
     while True:
+        frame_count += 1
+        log_debug = (frame_count % 30 == 0) # Log every 30 frames (~once per second)
+        
+        if log_debug:
+            print("\n--- [EDCircles Debug Log] ---")
         ret, frame = cap.read()
         frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
         display_frame = frame.copy()
-        
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.bilateralFilter(gray, BILATERAL_DIAMETER, BILATERAL_SIGMA_COLOR, BILATERAL_SIGMA_SPACE)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))     
 
-        x, y, w, h = [200, 100, 300, 200]
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        gaussian = cv2.GaussianBlur(hsv, (7, 7), 1.5)      # or cv2.medianBlur(img, 5)
+
+        blurred = cv2.bilateralFilter(gaussian, bilateral_diameter, bilateral_sigma_color, bilateral_sigma_space)
+        cv2.imshow("Blurred (Debug)", blurred)
+        # set region of interest
+        x, y, w, h = [200, 100, 300, 200]  # adjust these values
 
         roi = blurred[y:y+h, x:x+w]
         
         cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-        circles = cv2.HoughCircles(
-            roi,
-            cv2.HOUGH_GRADIENT,
-            1,
-            150,
-            param1=HOUGH_PARAM1,
-            param2=HOUGH_PARAM2,
-            minRadius=25,
-            maxRadius=55
-        )
+        
+        # Run EDCircles on the ROI
+        ed.detectEdges(roi)
+        ellipses = ed.detectEllipses()
+        
+        # Show debug edge map to see live edge segment extraction
+        edge_img = ed.getEdgeImage()
+        cv2.imshow("ED Edge Map (Debug)", edge_img)
 
         current_list = []
-        if circles is not None:
-            circles = np.uint16(np.around(circles))
-            for i in circles[0, :]:
-                full_x = i[0] + x
-                full_y = i[1] + y
+        if ellipses is not None:
+            if log_debug:
+                print(f"Total shapes detected by EDCircles: {len(ellipses[0])}")
                 
-                cv2.circle(display_frame, (full_x, full_y), i[2], (0, 255, 0), 2)
-                rx, ry = pixel_to_robot(full_x, full_y, H_matrix)
-                current_list.append((rx, ry))
+            for idx, ellipse in enumerate(ellipses[0]):
+                is_pure_circle = ellipse[2] > 0
+                
+                if is_pure_circle:
+                    cx_roi, cy_roi, r = int(ellipse[0]), int(ellipse[1]), int(ellipse[2])
+                    if log_debug:
+                        print(f"  [{idx}] Pure Circle at ({cx_roi}, {cy_roi}) with radius {r}px")
+                else:
+                    r_major, r_minor = ellipse[3], ellipse[4]
+                    ratio = r_major / r_minor if r_minor > 0 else 0
+                    cx_roi, cy_roi, r = int(ellipse[0]), int(ellipse[1]), int((r_major + r_minor) / 2)
+                    
+                    if log_debug:
+                        print(f"  [{idx}] Ellipse at ({cx_roi}, {cy_roi}): major={r_major:.1f}px, minor={r_minor:.1f}px, ratio={ratio:.2f}")
+                    
+                    if r_minor <= 0 or ratio >= 1.2:
+                        if log_debug:
+                            print(f"      -> REJECTED: Not circular enough (ratio {ratio:.2f} >= 1.2)")
+                        continue
+                
+                # Filter circles in the expected radius range (18 to 55 pixels)
+                if 18 <= r <= 55:
+                    full_x = cx_roi + x      # Add ROI x offset (200)
+                    
+                    full_y = cy_roi + y      # Add ROI y offset (100)
+                    
+                    cv2.circle(display_frame, (full_x, full_y), r, (0, 255, 0), 2)
+                    rx, ry = pixel_to_robot(full_x, full_y, H_matrix)
+                    
+                    # Apply moving average filter to smooth coordinates and prevent jitter
+                    coordinate_history.append((rx, ry))
+                    if len(coordinate_history) > 6:
+                        coordinate_history.pop(0)  # Keep the last 6 frames of history
+                    
+                    smooth_rx = sum(p[0] for p in coordinate_history) / len(coordinate_history)
+                    smooth_ry = sum(p[1] for p in coordinate_history) / len(coordinate_history)
+                    
+                    current_list.append((smooth_rx, smooth_ry))
+                    if log_debug:
+                        print(f"      -> ACCEPTED: Radius {r}px in range [18, 55], smoothed robot pos=({smooth_rx:.1f}, {smooth_ry:.1f})")
+                else:
+                    if log_debug:
+                        print(f"      -> REJECTED: Radius {r}px is outside expected range [18, 55]")
+        else:
+            if log_debug:
+                print("No shapes detected by Edge Drawing algorithm. (Tip: Try adjusting lighting, focus, or lowering GradientThresholdValue)")
 
+        # --- AUTO-LOCK LOGIC ---
         if len(current_list) > 0 and len(current_list) == last_count:
             stability_counter += 1
         else:
@@ -257,8 +312,13 @@ def phase_detect_plates():
             print(f"Locked {len(current_list)} plates.")
             return current_list
   
+ 
 
-
+# ---------------------------------------------------------
+# PHASE 2: DETECT Red velcros to pick up (Red Blocks)
+# this script assumes the targets to be picked up are red blocks
+# be aware your target maynot be red, and they may not be rectangular! You will need to modify the detection logic to fit your specific use case.
+# ---------------------------------------------------------
 def phase_detect_targets():
     print("\n[PHASE 2] Scanning for targets. Waiting for stability...")
     stability_counter = 0
@@ -266,17 +326,16 @@ def phase_detect_targets():
     
     while True:
         ret, frame = cap.read()
-        if not ret:
-            continue
+        if not ret: continue
         
         frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
+        # Create a display copy so drawings don't affect next frame's HSV detection
         display_frame = frame.copy()
         
+        # Red Tag Logic
         hsv = cv2.cvtColor(cv2.GaussianBlur(frame, (3,3), 0), cv2.COLOR_BGR2HSV)
-
         mask = cv2.inRange(hsv, np.array([0,120,70]), np.array([10,255,255])) + \
                cv2.inRange(hsv, np.array([170,120,70]), np.array([180,255,255]))
-
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
@@ -288,10 +347,12 @@ def phase_detect_targets():
                     cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
                     rx, ry = pixel_to_robot(cx, cy, H_matrix)
                     current_list.append((rx, ry))
+                    # Draw on display_frame only
                     cv2.drawContours(display_frame, [cnt], -1, (0, 255, 0), 2)
                     
         cv2.waitKey(1)
 
+        # --- STABILITY LOGIC ---
         if len(current_list) != 0:
             if len(current_list) > 0 and len(current_list) == last_count:
                 stability_counter += 1
@@ -299,6 +360,7 @@ def phase_detect_targets():
                 stability_counter = 0
                 last_count = len(current_list)
 
+        # Visual Feedback
         progress = int((stability_counter / STABILITY_LIMIT) * 100)
         color = (0, 255, 0) if progress < 100 else (255, 255, 0)
         
@@ -306,12 +368,20 @@ def phase_detect_targets():
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
         cv2.imshow("Detection", display_frame)
         
+        # --- EXIT CONDITION ---
         if stability_counter >= STABILITY_LIMIT:
             print(f"[SUCCESS] Locked {len(current_list)} targets.")
+            #cv2.waitKey(500) # Brief pause so you can see the 100%
+    
             return current_list
 
 
-
+# ---------------------------------------------------------
+# PHASE 3: PICK/PLACE LOOP
+# This function assumes 1 drop zone only has 1 part, and executes the pick/place operations in batches.
+# if you are picking up rigid car parts, would you still be able to move directly to the object and to the drop zone? 
+# Do you need collision avoidance? Think about if the robot gripper accidentally hits the plate or other parts on the way to the target, what would happen? How would you modify the robot's movement logic to avoid collisions?
+# ---------------------------------------------------------
 def phase_execute_batch(api, pick_list, drop_list):
     cv2.VideoCapture(0)
     time.sleep(0.5)
@@ -320,6 +390,7 @@ def phase_execute_batch(api, pick_list, drop_list):
         print("missing targets, aborting")
         return False
     
+    # Match 1 part to 1 drop zone (uses the smaller count)
     batch_size = min(len(pick_list), len(drop_list))
     print(f"\n[PHASE 3] Executing batch of {batch_size} operations.")
 
@@ -329,25 +400,46 @@ def phase_execute_batch(api, pick_list, drop_list):
 
         print(f"Task {i+1}: Moving {pick_x, pick_y} to {drop_x, drop_y}")
 
+        # --- PICK SEQUENCE ---
         safe_move_to_xyz(api, pick_x, pick_y, Z_SAFE)
         safe_move_to_xyz(api, pick_x, pick_y, Z_PICK)
+        #optional alternate function call method to include a rotation of the gripper angle
+        #safe_move_to_xyz(api, pick_x, pick_y, Z_SAFE, 45) 
 
         dobotArm.close_gripper(api)
-
         safe_move_to_xyz(api, pick_x, pick_y, Z_SAFE)
 
+        # --- PLACE SEQUENCE ---
         safe_move_to_xyz(api, drop_x, drop_y, Z_SAFE)
-
         dobotArm.open_gripper(api)
         dobotArm.stop_pump(api)
-
         safe_move_to_xyz(api, drop_x, drop_y, Z_SAFE)
+
+    # irl, it is ok for 1 dish to contain multiple parts
+    # if len(pick_list) > len(drop_list):
+    #     for i in range(len(pick_list)):
+    #         pick_x, pick_y = pick_list[i]
+    #         drop_x, drop_y = drop_list[0]
+    #         # --- PICK SEQUENCE ---
+    #         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+    #         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_PICK)
+    #         dobotArm.close_gripper(api)
+    #         dobotArm.move_to_xyz(api, pick_x, pick_y, Z_SAFE)
+
+    #     # --- PLACE SEQUENCE ---
+    #         dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
+    #         dobotArm.open_gripper(api)
+    #         dobotArm.stop_pump(api)
+    #         dobotArm.move_to_xyz(api, drop_x, drop_y, Z_SAFE)
 
     print("\nBatch Complete.")
     return True
  
 
-
+# ---------------------------------------------------------
+# MAIN EXECUTION
+# contains an oversimplified state machine that runs the three phases sequentially. You can modify the logic to fit your specific use case.
+# ---------------------------------------------------------
 dobotArm.initialize_robot(api)
 dobotArm.open_gripper(api)
 dobotArm.stop_pump(api)
@@ -368,8 +460,7 @@ while machine_state == "pick place":
     completed = phase_execute_batch(api, pick_target, drop_zone)
     if completed:
         next_state()
-    else:
-        break
+    else: break
 
 
 cap.release()
