@@ -108,12 +108,13 @@ def detect_gesture(hand_landmarks):
 
     thumb_index_dist = ((lm[4].x - lm[8].x) ** 2 + (lm[4].y - lm[8].y) ** 2) ** 0.5
 
-    if fingers_up >= 4:
+    # Prioritize pinch check first, as other fingers are curled during a pinch (which would otherwise trigger 'fist')
+    if thumb_index_dist < 0.055:
+        return "pinch"
+    elif fingers_up >= 4:
         return "open_palm"
     elif fingers_up == 0:
         return "fist"
-    elif thumb_index_dist < 0.055:
-        return "pinch"
     else:
         return "neutral"
 
