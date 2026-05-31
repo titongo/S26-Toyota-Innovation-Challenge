@@ -145,7 +145,13 @@ def detect_gesture(hand_landmarks):
 
 
 def safe_move_to_xyz(api, x, y, z, rHead=0):
-    while True:
+    print(f"Moving to: ({x}, {y}, {z}, rot={rHead}) with real-time safety tracking...")
+    
+    # Start the enqueued movement command
+    execCmd = dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJXYZMode, x, y, z, rHead, isQueued=1)[0]
+    
+    # Continuous camera read and hand tracking loop while the robot is moving
+    while execCmd > dType.GetQueuedCmdCurrentIndex(api)[0]:
         ret, frame = cap.read()
         if not ret or frame is None:
             continue
@@ -153,11 +159,14 @@ def safe_move_to_xyz(api, x, y, z, rHead=0):
         frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
         display_frame = frame.copy()
 
-        # Re-use the fast global hands tracker
+        # Re-use the pre-initialized global hands object for blazing speed!
         result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
         if result.multi_hand_landmarks:
             print("[SAFETY] Hand detected in workspace! Robot paused immediately.")
+            
+            # Force stop execution of the current movement command
+            dType.SetQueuedCmdForceStopExec(api)
             
             # Immediately move to safe vertical height
             dobotArm.move_to_xyz(api, x, y, Z_SAFE, rHead)
@@ -187,11 +196,14 @@ def safe_move_to_xyz(api, x, y, z, rHead=0):
                 cv2.imshow("Detection", display_frame_paused)
                 cv2.waitKey(1)
 
-            continue
+            # Resume the queue execution and restart the move command
+            print("Resuming movement...")
+            dType.SetQueuedCmdStartExec(api)
+            execCmd = dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJXYZMode, x, y, z, rHead, isQueued=1)[0]
 
-        break
-
-    dobotArm.move_to_xyz(api, x, y, z, rHead)
+        cv2.putText(display_frame, "ROBOT MOVING...", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        cv2.imshow("Detection", display_frame)
+        cv2.waitKey(1)
 
 
 # State machine logic to control the flow of the program through the three phases: scanning for plates, scanning for targets, and executing pick/place operations.
