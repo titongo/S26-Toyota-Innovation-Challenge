@@ -181,36 +181,36 @@ try:
                     status_text = "FIST -> Gripper CLOSED"
                     status_color = (0, 0, 255)
                     dobotArm.close_gripper(api)
-                    
-                elif gesture == "pinch":
-                    status_text = f"PINCH ACTIVE -> Teleoperating"
+                else:
+                    status_text = "TRACKING ACTIVE"
                     status_color = (255, 255, 0)
-                    
-                    # Convert index finger tip pixel to robot world coordinate
-                    target_rx, target_ry = pixel_to_robot(pixel_x, pixel_y, H_matrix)
-                    
-                    # Map the hand's pixel span (proximity to camera) to physical Z distance from the table!
-                    SPAN_MIN, SPAN_MAX = 50.0, 130.0
-                    clamped_span = max(SPAN_MIN, min(SPAN_MAX, span))
-                    target_rz = Z_MIN + ((clamped_span - SPAN_MIN) / (SPAN_MAX - SPAN_MIN)) * (Z_MAX - Z_MIN)
-                    
-                    # Apply safety workspace bounding box limits
-                    target_rx = max(X_MIN, min(X_MAX, target_rx))
-                    target_ry = max(Y_MIN, min(Y_MAX, target_ry))
-                    target_rz = max(Z_MIN, min(Z_MAX, target_rz))
-                    
-                    # Apply exponential moving average smoothing to prevent jumping
-                    smooth_rx = (1 - alpha) * smooth_rx + alpha * target_rx
-                    smooth_ry = (1 - alpha) * smooth_ry + alpha * target_ry
-                    current_z = (1 - alpha) * current_z + alpha * target_rz
-                    
-                    # Issue immediate, non-blocking move command
-                    # isQueued=0 means do not append to queue, execute instantly!
-                    dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJXYZMode, smooth_rx, smooth_ry, current_z, 0, isQueued=0)
-                    
-                    # Draw movement vector lines on GUI
-                    cv2.putText(display_frame, f"Robot Pos: ({smooth_rx:.0f}, {smooth_ry:.0f}, {current_z:.0f})", 
-                                (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+
+                # Continuous 3D hand tracking (regardless of gesture!)
+                # Convert index finger tip pixel to robot world coordinate
+                target_rx, target_ry = pixel_to_robot(pixel_x, pixel_y, H_matrix)
+                
+                # Map the hand's pixel span (proximity to camera) to physical Z distance from the table!
+                SPAN_MIN, SPAN_MAX = 50.0, 130.0
+                clamped_span = max(SPAN_MIN, min(SPAN_MAX, span))
+                target_rz = Z_MIN + ((clamped_span - SPAN_MIN) / (SPAN_MAX - SPAN_MIN)) * (Z_MAX - Z_MIN)
+                
+                # Apply safety workspace bounding box limits
+                target_rx = max(X_MIN, min(X_MAX, target_rx))
+                target_ry = max(Y_MIN, min(Y_MAX, target_ry))
+                target_rz = max(Z_MIN, min(Z_MAX, target_rz))
+                
+                # Apply exponential moving average smoothing to prevent jumping
+                smooth_rx = (1 - alpha) * smooth_rx + alpha * target_rx
+                smooth_ry = (1 - alpha) * smooth_ry + alpha * target_ry
+                current_z = (1 - alpha) * current_z + alpha * target_rz
+                
+                # Issue immediate, non-blocking move command
+                # isQueued=0 means do not append to queue, execute instantly!
+                dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJXYZMode, smooth_rx, smooth_ry, current_z, 0, isQueued=0)
+                
+                # Draw movement vector lines on GUI
+                cv2.putText(display_frame, f"Robot Pos: ({smooth_rx:.0f}, {smooth_ry:.0f}, {current_z:.0f})", 
+                            (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
             else:
                 status_text = f"Neutral Gesture (No Hand)"
                 status_color = (128, 255, 128)
