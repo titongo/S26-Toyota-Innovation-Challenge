@@ -7,16 +7,28 @@ import numpy as np
 import cv2
 from openni import openni2
 from openni import _openni2 as c_api
+import os
 
-OPENNI_REDIST = r"C:\Path\To\OpenNI2\Redist"   # <-- SAME path you put in the other files
+import libteam21
+
+
+OPENNI_REDIST = r"C:\Users\husky\Downloads\Orbbec_OpenNI_v2.3.0.86-beta6_windows_release\OpenNI_2.3.0.86_202210111950_4c8f5aa4_beta6_windows\Win64-Release\sdk\libs"   # <-- SAME path you put in the other files
 
 openni2.initialize(OPENNI_REDIST)
+
+cam_index, cam_backend = libteam21.auto_select_camera("integrated")
+cap = cv2.VideoCapture(cam_index, cam_backend)
+
 dev = openni2.Device.open_any()
 depth_stream = dev.create_depth_stream()
 depth_stream.set_video_mode(c_api.OniVideoMode(
     pixelFormat=c_api.OniPixelFormat.ONI_PIXEL_FORMAT_DEPTH_1_MM,   # values in millimetres
     resolutionX=640, resolutionY=480, fps=30))
 depth_stream.start()
+
+
+x, y, w, h = [375, 100, 10, 10]  # adjust these values
+
 
 print("Depth stream running. ESC in the window to quit.")
 while True:
@@ -26,7 +38,17 @@ while True:
     # turn the raw mm values into something viewable: 0..2000 mm -> 0..255 -> colour
     # (lower the 2000 if the scene is close and the picture looks too dark/flat)
     vis = cv2.applyColorMap(cv2.convertScaleAbs(depth, alpha=255.0 / 2000.0), cv2.COLORMAP_JET)
+    
+    cv2.rectangle(
+        vis,                # image to draw on
+        (x, y),             # top-left corner
+        (x+w, y+h),         # bottom-right corner
+        (0, 255, 0),        # green (B,G,R)
+        2                   # thickness in pixels
+    )
     cv2.imshow("Astra Depth", vis)
+    
+   
 
     if cv2.waitKey(1) & 0xFF == 27:   # ESC
         break
