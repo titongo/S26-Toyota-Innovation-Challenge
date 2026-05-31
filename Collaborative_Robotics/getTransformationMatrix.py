@@ -14,7 +14,7 @@ CON_STR = {
     dType.DobotConnect.DobotConnect_Occupied: "DobotConnect_Occupied"
 }
 
-cam_index, cam_backend = libteam21.autoSelectCamera()
+cam_index, cam_backend = libteam21.auto_select_camera()
 cam = cv2.VideoCapture(cam_index, cam_backend)
 
 if not cam.isOpened():
