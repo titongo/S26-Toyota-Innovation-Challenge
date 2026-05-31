@@ -105,6 +105,9 @@ def phase_detect_plates():
     bilateral_sigma_color = 40
     bilateral_sigma_space = 40
     
+    # Sliding window coordinate history to filter out frame-by-frame jittering
+    coordinate_history = []
+    
     # Initialize Edge Drawing object for EDCircles
     ed = cv2.ximgproc.createEdgeDrawing()
     
@@ -164,7 +167,16 @@ def phase_detect_plates():
                     
                     cv2.circle(display_frame, (full_x, full_y), r, (0, 255, 0), 2)
                     rx, ry = pixel_to_robot(full_x, full_y, H_matrix)
-                    current_list.append((rx, ry))
+                    
+                    # Apply moving average filter to smooth coordinates and prevent jitter
+                    coordinate_history.append((rx, ry))
+                    if len(coordinate_history) > 6:
+                        coordinate_history.pop(0)  # Keep the last 6 frames of history
+                    
+                    smooth_rx = sum(p[0] for p in coordinate_history) / len(coordinate_history)
+                    smooth_ry = sum(p[1] for p in coordinate_history) / len(coordinate_history)
+                    
+                    current_list.append((smooth_rx, smooth_ry))
 
         # --- AUTO-LOCK LOGIC ---
         if len(current_list) > 0 and len(current_list) == last_count:
