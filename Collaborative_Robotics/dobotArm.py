@@ -1,6 +1,7 @@
 import lib.DobotDllType as dType
 import platform
 import time
+import numpy as np
 
 #Useful global variables
 # --- These are status strings that you might see, so we're defining them here ---
@@ -87,6 +88,16 @@ def move_to_xyz(api,x,y,z,rHead=0):
     cmdIndx = -1
     print(f"[DEBUG] move_to_xyz started. Target coordinates: x={x}, y={y}, z={z}, rot={rHead}")
     
+    # Automatic safety coordinate clamping to prevent out-of-reach inverse kinematics failures
+    dist = np.sqrt(x**2 + y**2)
+    if dist > 295.0:
+        scale = 280.0 / dist
+        x_clamped = x * scale
+        y_clamped = y * scale
+        print(f"[WARNING] Coordinates ({x:.1f}, {y:.1f}) exceed Dobot maximum physical reach limit (320mm)!")
+        print(f"          Automatically clamping to safe radius (280mm): ({x_clamped:.1f}, {y_clamped:.1f})")
+        x, y = x_clamped, y_clamped
+
     # Enqueue command cleanly using isQueued=1 to ensure reliable queue tracking and prevent deadlocks
     execCmd = dType.SetPTPCmd(api,dType.PTPMode.PTPMOVJXYZMode,x,y,z,rHead,isQueued=1)[0]
     print(f"[DEBUG] Move command enqueued with index: {execCmd}")
