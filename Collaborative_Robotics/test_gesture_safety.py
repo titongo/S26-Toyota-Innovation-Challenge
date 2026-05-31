@@ -8,6 +8,8 @@ import sys
 
 import libteam21
 import mediapipe as mp
+import mediapipe.solutions.hands
+import mediapipe.solutions.drawing_utils
 
 print("=== STARTING STANDALONE GESTURE SAFETY TEST ===")
 
