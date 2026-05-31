@@ -144,6 +144,15 @@ def safe_move_to_xyz(api, x, y, z):
         result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
         if result.multi_hand_landmarks:
+            # Draw landmarks on current frame before pausing
+            mp_drawing.draw_landmarks(
+                display_frame, result.multi_hand_landmarks[0], mp_hands.HAND_CONNECTIONS
+            )
+            cv2.putText(display_frame, "HAND IN WORKSPACE - PAUSING!", (20, 80), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            cv2.imshow("Detection", display_frame)
+            cv2.waitKey(1)
+            
             print("[SAFETY] Hand detected in workspace! Robot paused immediately.")
             
             # Immediately move to safe vertical height
@@ -176,6 +185,10 @@ def safe_move_to_xyz(api, x, y, z):
 
             continue
 
+        cv2.putText(display_frame, "ROBOT MOVING...", (20, 80), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        cv2.imshow("Detection", display_frame)
+        cv2.waitKey(1)
         break
 
     dobotArm.move_to_xyz(api, x, y, z)
